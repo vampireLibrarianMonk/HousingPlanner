@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from datetime import date, timezone
+from datetime import date
 
 import polyline
 import streamlit as st
@@ -12,10 +12,87 @@ from geopy.geocoders import Nominatim
 import os
 from dotenv import load_dotenv
 
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from astral import LocationInfo
+from astral.sun import sun, azimuth
+
 import requests
 import pandas as pd
 
-from datetime import datetime, timedelta
+from PIL import Image, ImageDraw
+import math
+import io
+
+from PIL import ImageFont
+
+from shapely.geometry import shape, Point
+from shapely.ops import transform
+import pyproj
+
+from collections import defaultdict
+
+from fastkml import kml
+
+FEMA_FEATURE_URL = (
+    "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
+)
+
+WILDFIRE_KML_URL = (
+    "https://apps.fs.usda.gov/arcx/rest/services/"
+    "EDW/EDW_MTBS_01/MapServer/generateKML"
+)
+
+FEMA_ZONE_EXPLANATIONS = {
+    "AE": {
+        "title": "High Flood Risk (Zone AE)",
+        "summary": (
+            "This area is within the 1% annual-chance floodplain "
+            "(commonly called the 100-year floodplain)."
+        ),
+        "insurance": "Flood insurance is federally required for most mortgages.",
+    },
+    "A": {
+        "title": "High Flood Risk (Zone A)",
+        "summary": "High flood risk area without detailed base flood elevations.",
+        "insurance": "Flood insurance is federally required.",
+    },
+    "VE": {
+        "title": "Very High Flood Risk (Coastal Zone VE)",
+        "summary": "Coastal area with wave action and storm surge risk.",
+        "insurance": "Flood insurance is federally required and typically expensive.",
+    },
+    "X": {
+        "title": "Low Flood Risk (Zone X)",
+        "summary": (
+            "Outside the 1% annual-chance floodplain. "
+            "Represents minimal flood risk."
+        ),
+        "insurance": "Flood insurance is not federally required.",
+    },
+    "OPEN WATER": {
+        "title": "Open Water / Water Body",
+        "summary": "Permanent water features such as rivers or lakes.",
+        "insurance": "Flood insurance requirements depend on structure placement.",
+    },
+}
+
+zone_descriptions = {
+    "AE": "higher-risk floodplains along major streams",
+    "A": "higher-risk floodplains without detailed elevation studies",
+    "D": "areas with undetermined flood risk",
+    "X": "low-risk areas",
+}
+
+FLOOD_ZONE_COLORS = {
+    "VE": {"stroke": "#7F0000", "fill": "#D32F2F", "opacity": 0.55},  # Extreme
+    "AE": {"stroke": "#C62828", "fill": "#EF5350", "opacity": 0.50},  # High
+    "A":  {"stroke": "#EF6C00", "fill": "#FFB74D", "opacity": 0.45},  # High (unstudied)
+    "D":  {"stroke": "#6A1B9A", "fill": "#CE93D8", "opacity": 0.35},  # Undetermined
+    "X":  {"stroke": "#1B5E20", "fill": "#A5D6A7", "opacity": 0.18},  # Low
+}
+
 
 # ---------------------------------------------
 # Load environment variables (.env)
@@ -432,6 +509,358 @@ def decode_geometry(geometry, provider):
     return []
 
 
+@st.cache_data(show_spinner=False, ttl=86400)
+def get_static_osm_image(lat, lon, zoom=19, size=800):
+    tile_size = 256
+    scale = size // tile_size
+
+    def deg2num(lat_deg, lon_deg, zoom):
+        lat_rad = math.radians(lat_deg)
+        n = 2.0 ** zoom
+        xtile = int((lon_deg + 180.0) / 360.0 * n)
+        ytile = int(
+            (1.0 - math.log(math.tan(lat_rad) + (1 / math.cos(lat_rad))) / math.pi)
+            / 2.0 * n
+        )
+        return xtile, ytile
+
+    cx, cy = deg2num(lat, lon, zoom)
+
+    img = Image.new("RGB", (size, size))
+    for dx in range(-scale // 2, scale // 2):
+        for dy in range(-scale // 2, scale // 2):
+            url = (
+                "https://services.arcgisonline.com/ArcGIS/rest/services/"
+                "World_Imagery/MapServer/tile/"
+                f"{zoom}/{cy + dy}/{cx + dx}"
+            )
+
+            headers = {
+                "User-Agent": "House-Planner-Prototype/1.0 (local use)",
+            }
+
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+
+            tile = Image.open(io.BytesIO(resp.content))
+
+            img.paste(
+                tile,
+                (
+                    (dx + scale // 2) * tile_size,
+                    (dy + scale // 2) * tile_size,
+                ),
+            )
+
+    return img
+
+
+def compute_season_azimuths(lat, lon, tz_name):
+    seasons = {
+        "Winter": date(2025, 12, 21),
+        "Equinox": date(2025, 3, 20),
+        "Summer": date(2025, 6, 21),
+    }
+
+    results = {}
+
+    for season, d in seasons.items():
+        loc = LocationInfo(latitude=lat, longitude=lon, timezone=tz_name)
+        s = sun(loc.observer, date=d, tzinfo=ZoneInfo(tz_name))
+
+        azimuths = []
+        t = s["sunrise"]
+        while t <= s["sunset"]:
+            azimuths.append(
+                azimuth(loc.observer, t)
+            )
+            t += timedelta(minutes=10)
+
+        results[season] = azimuths
+
+    return results
+
+
+def draw_solar_overlay(base_img, azimuths_by_season, base_alpha=0.60):
+    img = base_img.copy().convert("RGBA")
+    draw = ImageDraw.Draw(img)
+
+    size = img.size[0]
+    cx = cy = size // 2
+    r_inner = int(0.15 * size)
+    r_outer = int(0.45 * size)
+
+    # Fixed, legend-safe colors
+    season_colors = {
+        "Winter": (79, 195, 247),
+        "Equinox": (129, 199, 132),
+        "Summer": (255, 183, 77),
+    }
+
+    # ----------------------------------------
+    # 1) Build dominant-season ownership per 5° bin
+    # ----------------------------------------
+    dominant_bins = {}
+
+    for season, azimuths in azimuths_by_season.items():
+        for a in azimuths:
+            bin_angle = int(a // 5) * 5
+            dominant_bins.setdefault(bin_angle, {})
+            dominant_bins[bin_angle][season] = (
+                dominant_bins[bin_angle].get(season, 0) + 1
+            )
+
+    # ----------------------------------------
+    # 2) Render each bin ONCE, using dominant season
+    # ----------------------------------------
+    alpha = int(255 * base_alpha)
+
+    for angle, season_counts in dominant_bins.items():
+        dominant_season = max(season_counts, key=season_counts.get)
+        color = (*season_colors[dominant_season], alpha)
+
+        start_deg = angle - 90
+        end_deg = angle + 5 - 90
+
+        # Per-bin overlay
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+
+        # Outer wedge
+        odraw.pieslice(
+            [
+                cx - r_outer,
+                cy - r_outer,
+                cx + r_outer,
+                cy + r_outer,
+            ],
+            start_deg,
+            end_deg,
+            fill=color,
+        )
+
+        # Inner cutout mask
+        mask = Image.new("L", img.size, 0)
+        mdraw = ImageDraw.Draw(mask)
+        mdraw.pieslice(
+            [
+                cx - r_inner,
+                cy - r_inner,
+                cx + r_inner,
+                cy + r_inner,
+            ],
+            start_deg,
+            end_deg,
+            fill=255,
+        )
+
+        overlay.paste((0, 0, 0, 0), mask=mask)
+        img.alpha_composite(overlay)
+
+    # ----------------------------------------
+    # 3) Reference ring (context, not data)
+    # ----------------------------------------
+    draw.ellipse(
+        [
+            cx - r_outer,
+            cy - r_outer,
+            cx + r_outer,
+            cy + r_outer,
+        ],
+        outline=(255, 255, 255, int(255 * base_alpha * 0.15)),
+        width=2,
+    )
+
+    # ----------------------------------------
+    # 4) Compass (cardinal directions)
+    # ----------------------------------------
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 18)
+    except IOError:
+        font = ImageFont.load_default()
+    compass_radius = r_inner - 18
+
+    draw.text((cx - 6, cy - compass_radius), "N", fill="white", font=font)
+    draw.text((cx - 6, cy + compass_radius - 14), "S", fill="white", font=font)
+    draw.text((cx + compass_radius - 12, cy - 8), "E", fill="white", font=font)
+    draw.text((cx - compass_radius + 4, cy - 8), "W", fill="white", font=font)
+
+    return img
+
+
+def bbox_from_point(lat, lon, delta_lat=0.06, delta_lon=0.08):
+    return (
+        lon - delta_lon,
+        lat - delta_lat,
+        lon + delta_lon,
+        lat + delta_lat,
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def fetch_fema_flood_zones(bbox, page_size=50, max_pages=40):
+    west, south, east, north = bbox
+
+    all_features = []
+    offset = 0
+
+    for _ in range(max_pages):
+        params = {
+            "where": "1=1",
+            "geometry": f"{west},{south},{east},{north}",
+            "geometryType": "esriGeometryEnvelope",
+            "spatialRel": "esriSpatialRelIntersects",
+            "inSR": 4326,
+            "outSR": 4326,
+            "returnGeometry": "true",
+            "outFields": "FLD_ZONE,ZONE_SUBTY,SFHA_TF",
+            "resultRecordCount": page_size,
+            "resultOffset": offset,
+            "f": "geojson",
+        }
+
+        r = requests.get(FEMA_FEATURE_URL, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+
+        features = data.get("features", [])
+        if not features:
+            break
+
+        all_features.extend(features)
+
+        if not data.get("exceededTransferLimit"):
+            break
+
+        offset += page_size
+        time.sleep(0.15)
+
+    return {
+        "type": "FeatureCollection",
+        "features": all_features,
+    }
+
+
+def flood_zone_style(feature):
+    zone = feature["properties"].get("FLD_ZONE", "")
+
+    if zone.startswith("A"):
+        return {
+            "color": "#1565C0",
+            "weight": 1,
+            "fillColor": "#1565C0",
+            "fillOpacity": 0.45,
+        }
+    if zone.startswith("V"):
+        return {
+            "color": "#C62828",
+            "weight": 1,
+            "fillColor": "#C62828",
+            "fillOpacity": 0.45,
+        }
+    if zone == "X":
+        return {
+            "color": "#2E7D32",
+            "weight": 1,
+            "fillColor": "#2E7D32",
+            "fillOpacity": 0.25,
+        }
+
+    return {
+        "color": "#9E9E9E",
+        "weight": 0.5,
+        "fillOpacity": 0.15,
+    }
+
+
+def summarize_flood_zones(geojson):
+    zones = {
+        f["properties"].get("FLD_ZONE")
+        for f in geojson.get("features", [])
+        if f.get("properties")
+    }
+
+    if not zones:
+        return None, None
+
+    # Risk priority (worst first)
+    priority = ["VE", "AE", "A", "X", "OPEN WATER"]
+
+    for p in priority:
+        if p in zones:
+            return p, zones
+
+    return list(zones)[0], zones
+
+
+def flood_zone_at_point(geojson, lat, lon):
+    """
+    Returns the FLD_ZONE for the polygon containing the point, or None.
+    """
+    pt = Point(lon, lat)
+
+    for feature in geojson.get("features", []):
+        geom = feature.get("geometry")
+        props = feature.get("properties", {})
+        if not geom:
+            continue
+
+        polygon = shape(geom)
+        if polygon.contains(pt):
+            return props.get("FLD_ZONE"), props.get("SFHA_TF")
+
+    return None, None
+
+
+def flood_zone_style(feature):
+    zone = feature["properties"].get("FLD_ZONE", "")
+    base = FLOOD_ZONE_COLORS.get(zone, None)
+
+    if base:
+        return {
+            "color": base["stroke"],
+            "weight": 1.2,
+            "fillColor": base["fill"],
+            "fillOpacity": base["opacity"],
+        }
+
+    return {
+        "color": "#9E9E9E",
+        "weight": 0.6,
+        "fillOpacity": 0.15,
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def fetch_wildfire_kml():
+    params = {
+        "layers": "63",  # Burned Area Boundaries (All Years)
+        "layerOptions": "vector",  # vectors as vectors
+        "f": "kml",
+    }
+
+    r = requests.get(WILDFIRE_KML_URL, params=params, timeout=60)
+    r.raise_for_status()
+
+    return r.content
+
+
+def parse_kml_polygons(kml_bytes):
+    k = kml.KML()
+    k.from_string(kml_bytes)
+
+    features = []
+
+    def walk(obj):
+        for f in getattr(obj, "features", lambda: [])():
+            if hasattr(f, "geometry") and f.geometry:
+                features.append(f.geometry)
+            walk(f)
+
+    walk(next(iter(k.features())))
+
+    return features
+
 # -----------------------------
 # Session State
 # -----------------------------
@@ -477,12 +906,24 @@ if "map_badge" not in st.session_state:
 if "map_expanded" not in st.session_state:
     st.session_state["map_expanded"] = False
 
+if "mortgage_expanded" not in st.session_state:
+    st.session_state["mortgage_expanded"] = False
+
 if "commute_results" not in st.session_state:
     # Holds results per provider: {"ORS": {...}, "Google": {...}}
     st.session_state["commute_results"] = {}
 
 if "commute_expanded" not in st.session_state:
-    st.session_state["commute_expanded"] = True
+    st.session_state["commute_expanded"] = False
+
+if "sun_expanded" not in st.session_state:
+    st.session_state["sun_expanded"] = False
+
+if "disaster_expanded" not in st.session_state:
+    st.session_state["disaster_expanded"] = False
+
+if "disaster_radius_miles" not in st.session_state:
+    st.session_state["disaster_radius_miles"] = 5
 
 if "show_ors" not in st.session_state:
     st.session_state["show_ors"] = False
@@ -492,6 +933,28 @@ if "show_google" not in st.session_state:
 
 if "show_markers" not in st.session_state:
     st.session_state["show_markers"] = False
+
+if "hz_flood" not in st.session_state:
+    st.session_state["hz_flood"] = False
+
+if "hz_wildfire" not in st.session_state:
+    st.session_state["hz_wildfire"] = False
+
+if "hz_earthquake" not in st.session_state:
+    st.session_state["hz_earthquake"] = False
+
+if "hz_wind" not in st.session_state:
+    st.session_state["hz_wind"] = False
+
+if "hz_heat" not in st.session_state:
+    st.session_state["hz_heat"] = False
+
+if "hz_disaster_history" not in st.session_state:
+    st.session_state["hz_disaster_history"] = False
+
+if "hz_land_use" not in st.session_state:
+    st.session_state["hz_land_use"] = False
+
 
 # -----------------------------
 # Streamlit UI
@@ -521,7 +984,7 @@ commute_badge = "—"
 # =============================
 with st.expander(
     f"Mortgage & Loan Assumptions  •  {st.session_state['mortgage_badge']}",
-    expanded=True
+    expanded=st.session_state["mortgage_expanded"],
 ):
 
     with st.expander("Show the math & assumptions", expanded=False):
@@ -534,214 +997,360 @@ with st.expander(
     left, right = st.columns([1.05, 1.25], gap="large")
 
     with left:
-        st.subheader("Modify the values and click Calculate")
+        with st.form("mortgage_form"):
+            st.subheader("Modify the values and click Calculate")
 
-        home_price = st.number_input(
-            "Home Price ($)",
-            min_value=0.0,
-            value=400000.0,
-            step=1000.0,
-            format="%.2f"
-        )
-
-        dp_cols = st.columns([0.6, 0.4])
-        with dp_cols[0]:
-            down_payment_value = st.number_input(
-                "Down Payment",
+            home_price = st.number_input(
+                "Home Price ($)",
                 min_value=0.0,
-                value=20.0,
-                step=1.0
+                value=400000.0,
+                step=1000.0,
+                format="%.2f"
             )
-        with dp_cols[1]:
-            down_payment_is_percent = st.selectbox(
-                "Down Payment Unit",
-                ["%", "$"],
-                index=0,
-                label_visibility="collapsed"
-            )
-        dp_is_percent = (down_payment_is_percent == "%")
 
-        loan_term_years = st.number_input(
-            "Loan Term (years)",
-            min_value=1,
-            value=30,
-            step=1
-        )
+            dp_cols = st.columns([0.75, 0.25], gap="small")
+            with dp_cols[0]:
+                down_payment_value = st.number_input(
+                    "Down Payment",
+                    min_value=0.0,
+                    value=20.0,
+                    step=1.0,
+                    label_visibility="collapsed"
+                )
+            with dp_cols[1]:
+                down_payment_is_percent = st.selectbox(
+                    "Unit",
+                    ["%", "$"],
+                    index=0,
+                    label_visibility="collapsed"
+                )
 
-        annual_rate = st.number_input(
-            "Interest Rate (%)",
-            min_value=0.0,
-            value=6.17,
-            step=0.01,
-            format="%.2f"
-        )
+            dp_is_percent = (down_payment_is_percent == "%")
 
-        sd_cols = st.columns([0.6, 0.4])
-        with sd_cols[0]:
-            start_month_name = st.selectbox(
-                "Start Date (month)",
-                ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],
-                index=0
-            )
-        with sd_cols[1]:
-            start_year = st.number_input(
-                "Start Date (year)",
-                min_value=1900,
-                max_value=2200,
-                value=2026,
+            loan_term_years = st.number_input(
+                "Loan Term (years)",
+                min_value=1,
+                value=30,
                 step=1
             )
 
-        start_month = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].index(start_month_name) + 1
-
-        include_costs = st.checkbox("Include Taxes & Costs Below", value=True)
-
-        st.markdown("### Annual Tax & Cost")
-
-        tax_cols = st.columns([0.6, 0.4])
-        with tax_cols[0]:
-            property_tax_value = st.number_input(
-                "Property Taxes",
+            annual_rate = st.number_input(
+                "Interest Rate (%)",
                 min_value=0.0,
-                value=1.2,
-                step=0.1
-            )
-        with tax_cols[1]:
-            property_tax_unit = st.selectbox(
-                "Property Tax Unit",
-                ["%", "$/year"],
-                index=0,
-                label_visibility="collapsed"
+                value=6.17,
+                step=0.01,
+                format="%.2f"
             )
 
-        property_tax_is_percent = (property_tax_unit == "%")
+            sd_cols = st.columns([0.6, 0.4])
+            with sd_cols[0]:
+                start_month_name = st.selectbox(
+                    "Start Date (month)",
+                    ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],
+                    index=0
+                )
+            with sd_cols[1]:
+                start_year = st.number_input(
+                    "Start Date (year)",
+                    min_value=1900,
+                    max_value=2200,
+                    value=2026,
+                    step=1
+                )
 
-        home_insurance_annual = st.number_input(
-            "Home Insurance ($/year)",
-            min_value=0.0,
-            value=1500.0,
-            step=50.0
-        )
+            start_month = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].index(start_month_name) + 1
 
-        pmi_monthly = st.number_input(
-            "PMI / Mortgage Insurance ($/month)",
-            min_value=0.0,
-            value=0.0,
-            step=10.0,
-            help="Optional. Set to 0 if not applicable."
-        )
+            include_costs = st.checkbox("Include Taxes & Costs Below", value=True)
 
-        hoa_monthly = st.number_input(
-            "HOA Fee ($/month)",
-            min_value=0.0,
-            value=0.0,
-            step=10.0
-        )
+            st.markdown("### Annual Tax & Cost")
 
-        other_monthly = st.number_input(
-            "Other Costs ($/month)",
-            min_value=0.0,
-            value=333.33,
-            step=10.0
-        )
+            tax_cols = st.columns([0.75, 0.25], gap="small")
+            with tax_cols[0]:
+                property_tax_value = st.number_input(
+                    "Property Taxes",
+                    min_value=0.0,
+                    value=1.2,
+                    step=0.1,
+                    label_visibility="collapsed"
+                )
+            with tax_cols[1]:
+                property_tax_unit = st.selectbox(
+                    "Unit",
+                    ["%", "$/year"],
+                    index=0,
+                    label_visibility="collapsed"
+                )
 
-        calculate = st.button("Calculate", type="primary")
+            property_tax_is_percent = (property_tax_unit == "%")
+
+            home_insurance_annual = st.number_input(
+                "Home Insurance ($/year)",
+                min_value=0.0,
+                value=1500.0,
+                step=50.0
+            )
+
+            pmi_monthly = st.number_input(
+                "PMI / Mortgage Insurance ($/month)",
+                min_value=0.0,
+                value=0.0,
+                step=10.0
+            )
+
+            hoa_monthly = st.number_input(
+                "HOA Fee ($/month)",
+                min_value=0.0,
+                value=0.0,
+                step=10.0
+            )
+
+            other_monthly = st.number_input(
+                "Other Home Costs ($/month)",
+                min_value=0.0,
+                value=0.0,
+                step=25.0,
+                help="Home-related costs not captured above (maintenance, misc)."
+            )
+
+            # ---- Annual Tax & Cost Summary ----
+            if property_tax_is_percent:
+                property_tax_annual = home_price * (property_tax_value / 100.0)
+            else:
+                property_tax_annual = property_tax_value
+
+            monthly_home_costs = (
+                    property_tax_annual / 12.0
+                    + home_insurance_annual / 12.0
+                    + pmi_monthly
+                    + hoa_monthly
+                    + other_monthly
+            )
+
+            include_household_expenses = st.checkbox(
+                "Include Household Expenses Below",
+                value=True
+            )
+
+            # =============================
+            # Household Expenses
+            # =============================
+            st.markdown("### Household Expenses")
+
+            if include_household_expenses:
+                daycare_monthly = st.number_input(
+                    "Daycare ($/month)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=50.0
+                )
+
+                groceries_weekly = st.number_input(
+                    "Groceries ($/week)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=10.0
+                )
+
+                utilities_monthly = st.number_input(
+                    "Utilities ($/month)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=25.0
+                )
+
+                car_maintenance_annual = st.number_input(
+                    "Car Maintenance ($/year)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=100.0
+                )
+            else:
+                daycare_monthly = 0.0
+                groceries_weekly = 0.0
+                utilities_monthly = 0.0
+                car_maintenance_annual = 0.0
+
+            # ---- Household Expenses Summary ----
+            household_monthly = (
+                    daycare_monthly
+                    + (groceries_weekly * 52.0 / 12.0)
+                    + utilities_monthly
+                    + (car_maintenance_annual / 12.0)
+            )
+
+            calculate = st.form_submit_button("Calculate", type="primary")
+
+            if calculate:
+                st.session_state["mortgage_expanded"] = True
+
+        # =============================
+        # Additional Custom Expenses
+        # =============================
+        st.markdown("### Additional Expenses")
+
+        if "custom_expenses" not in st.session_state:
+            st.session_state["custom_expenses"] = pd.DataFrame(
+                columns=["Label", "Amount", "Cadence"]
+            )
+
+        with st.form("custom_expenses_form"):
+            custom_df = st.data_editor(
+                st.session_state["custom_expenses"],
+                hide_index=True,
+                num_rows="dynamic",
+                column_config={
+                    "Label": st.column_config.TextColumn("Expense"),
+                    "Amount": st.column_config.NumberColumn(
+                        "Amount",
+                        min_value=0.0,
+                        step=10.0
+                    ),
+                    "Cadence": st.column_config.SelectboxColumn(
+                        "Cadence",
+                        options=["$/month", "$/year"]
+                    ),
+                },
+            )
+
+            save_custom = st.form_submit_button("Apply Expenses")
+
+        if save_custom:
+            st.session_state["custom_expenses"] = custom_df
+
+        if not st.session_state["custom_expenses"].empty:
+            custom_monthly = 0.0
+            for _, row in st.session_state["custom_expenses"].iterrows():
+                if row["Cadence"] == "$/month":
+                    custom_monthly += row["Amount"]
+                elif row["Cadence"] == "$/year":
+                    custom_monthly += row["Amount"] / 12.0
+
+            st.caption(
+                f"**Custom Expenses Summary:** "
+                f"${custom_monthly:,.0f} / month"
+            )
 
     # -----------------------------
     # RIGHT PANEL (computed outputs)
     # -----------------------------
     with right:
-        # Down payment & loan amount
-        if dp_is_percent:
-            down_payment_amt = home_price * (down_payment_value / 100.0)
-        else:
-            down_payment_amt = down_payment_value
+        if calculate:
+            # ---- Loan Summary inputs ----
+            if dp_is_percent:
+                down_payment_amt = home_price * (down_payment_value / 100.0)
+            else:
+                down_payment_amt = down_payment_value
 
-        loan_amount = max(home_price - down_payment_amt, 0.0)
+            loan_amount = max(home_price - down_payment_amt, 0.0)
 
-        inputs = MortgageInputs(
-            home_price=home_price,
-            down_payment_value=down_payment_value,
-            down_payment_is_percent=dp_is_percent,
-            loan_term_years=int(loan_term_years),
-            annual_interest_rate_pct=annual_rate,
-            start_month=int(start_month),
-            start_year=int(start_year),
-            include_costs=include_costs,
-            property_tax_value=property_tax_value,
-            property_tax_is_percent=property_tax_is_percent,
-            home_insurance_annual=home_insurance_annual,
-            pmi_monthly=pmi_monthly,
-            hoa_monthly=hoa_monthly,
-            other_monthly=other_monthly,
-        )
+            inputs = MortgageInputs(
+                home_price=home_price,
+                down_payment_value=down_payment_value,
+                down_payment_is_percent=dp_is_percent,
+                loan_term_years=int(loan_term_years),
+                annual_interest_rate_pct=annual_rate,
+                start_month=int(start_month),
+                start_year=int(start_year),
+                include_costs=include_costs,
+                property_tax_value=property_tax_value,
+                property_tax_is_percent=property_tax_is_percent,
+                home_insurance_annual=home_insurance_annual,
+                pmi_monthly=pmi_monthly,
+                hoa_monthly=hoa_monthly,
+                other_monthly=other_monthly,
+            )
 
-        pi = monthly_pi_payment(
-            loan_amount,
-            inputs.annual_interest_rate_pct,
-            inputs.loan_term_years
-        )
+            pi = monthly_pi_payment(
+                loan_amount,
+                inputs.annual_interest_rate_pct,
+                inputs.loan_term_years
+            )
 
-        total_interest, total_pi_paid = amortization_totals(
-            loan_amount,
-            inputs.annual_interest_rate_pct,
-            inputs.loan_term_years,
-            pi
-        )
+            total_interest, total_pi_paid = amortization_totals(
+                loan_amount,
+                inputs.annual_interest_rate_pct,
+                inputs.loan_term_years,
+                pi
+            )
 
-        costs = compute_costs_monthly(inputs, method=method)
+            costs = compute_costs_monthly(inputs, method=method)
 
-        monthly_tax = costs["property_tax_monthly"] if include_costs else 0.0
-        monthly_ins = costs["home_insurance_monthly"] if include_costs else 0.0
-        monthly_hoa = costs["hoa_monthly"] if include_costs else 0.0
-        monthly_pmi = costs["pmi_monthly"] if include_costs else 0.0
-        monthly_other = costs["other_monthly"] if include_costs else 0.0
+            monthly_tax = costs["property_tax_monthly"] if include_costs else 0.0
+            monthly_ins = costs["home_insurance_monthly"] if include_costs else 0.0
+            monthly_hoa = costs["hoa_monthly"] if include_costs else 0.0
+            monthly_pmi = costs["pmi_monthly"] if include_costs else 0.0
+            monthly_other = costs["other_monthly"] if include_costs else 0.0
 
-        monthly_total = (
-            pi
-            + monthly_tax
-            + monthly_ins
-            + monthly_hoa
-            + monthly_pmi
-            + monthly_other
-        )
+            monthly_total = (
+                    pi
+                    + monthly_tax
+                    + monthly_ins
+                    + monthly_hoa
+                    + monthly_pmi
+                    + monthly_other
+            )
 
-        # Update badge *after* calculation
-        st.session_state["mortgage_badge"] = f"Monthly: ${monthly_total:,.0f}"
+            # Green bar ONCE (after monthly_total exists)
+            st.markdown(
+                f"""
+                <div style="padding: 14px; border-radius: 6px; background: #2e7d32;
+                            color: white; font-size: 22px; font-weight: 700;">
+                    Monthly Payment: ${monthly_total:,.2f}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
-        st.markdown(
-            f"""
-            <div style="padding: 14px; border-radius: 6px; background: #2e7d32;
-                        color: white; font-size: 22px; font-weight: 700;">
-                Monthly Pay: ${monthly_total:,.2f}
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+            # Update badge once
+            st.session_state["mortgage_badge"] = f"Monthly: ${monthly_total:,.0f}"
 
-        # ---- Summary (unchanged, now fully wired) ----
-        st.markdown("### Summary")
-        payoff = payoff_date(
-            inputs.start_year,
-            inputs.start_month,
-            inputs.loan_term_years
-        )
+            # ---- Summary ----
+            st.markdown("### Summary")
+            payoff = payoff_date(
+                inputs.start_year,
+                inputs.start_month,
+                inputs.loan_term_years
+            )
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("House Price", f"${home_price:,.2f}")
-            st.metric("Loan Amount", f"${loan_amount:,.2f}")
-            st.metric("Down Payment", f"${down_payment_amt:,.2f}")
-        with c2:
-            st.metric("Total of Mortgage Payments (P&I)", f"${total_pi_paid:,.2f}")
-            st.metric("Total Interest", f"${total_interest:,.2f}")
-            st.metric("Mortgage Payoff Date", payoff)
+            custom_monthly = 0.0
+            if not st.session_state.get("custom_expenses", pd.DataFrame()).empty:
+                for _, row in st.session_state["custom_expenses"].iterrows():
+                    if row["Cadence"] == "$/month":
+                        custom_monthly += row["Amount"]
+                    elif row["Cadence"] == "$/year":
+                        custom_monthly += row["Amount"] / 12.0
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("House Price", f"${home_price:,.2f}")
+                st.metric("Loan Amount", f"${loan_amount:,.2f}")
+                st.metric("Down Payment", f"${down_payment_amt:,.2f}")
+            with c2:
+                st.metric("Total of Mortgage Payments (P&I)", f"${total_pi_paid:,.2f}")
+                st.metric("Total Interest", f"${total_interest:,.2f}")
+                st.metric("Mortgage Payoff Date", payoff)
+            with c3:
+                st.metric(
+                    "Tax & Cost (Monthly)",
+                    f"${monthly_home_costs:,.0f}",
+                    help="Property tax, insurance, HOA, PMI, other"
+                )
+                st.metric(
+                    "Household Expenses (Monthly)",
+                    f"${household_monthly:,.0f}",
+                    help="Daycare, groceries, utilities, car"
+                )
+                st.metric(
+                    "Additional Expenses (Monthly)",
+                    f"${custom_monthly:,.0f}",
+                    help="User-defined expenses (monthly + annual normalized)"
+                )
 
 # =============================
 # Map Section
 # =============================
 with st.expander(
-    f"Map & Locations  •  {st.session_state['map_badge']}",
+    f"Location Management  •  {st.session_state['map_badge']}",
     expanded=st.session_state["map_expanded"]
 ):
     st.subheader("Add a Location")
@@ -791,7 +1400,6 @@ with st.expander(
                     # Update badge and keep section open
                     count = len(st.session_state["map_data"]["locations"])
                     st.session_state["map_badge"] = f"{count} locations"
-                    st.session_state["map_expanded"] = True
                 else:
                     st.error("Address not found. Try a more complete address.")
             except Exception as e:
@@ -802,160 +1410,14 @@ with st.expander(
     # -----------------------------
     locations = st.session_state["map_data"]["locations"]
 
-    map_col, table_col = st.columns([0.7, 0.3], gap="large")
+    table_col = st.columns([1])[0]
 
-    # -------- MAP COLUMN --------
-    with map_col:
-        # ---------------------------------------
-        # Apply auto-defaults ONCE, then release control
-        # ---------------------------------------
-        if st.session_state.get("last_commute_provider_applied") is not True:
-            provider = st.session_state.get("last_commute_provider")
-
-            if provider == "ORS":
-                st.session_state["show_ors"] = True
-                st.session_state["show_google"] = False
-            elif provider == "Google":
-                st.session_state["show_google"] = True
-                st.session_state["show_ors"] = False
-
-            if st.session_state.get("auto_show_markers"):
-                st.session_state["show_markers"] = True
-                st.session_state.pop("auto_show_markers", None)
-
-            # mark defaults as applied so user regains control
-            st.session_state["last_commute_provider_applied"] = True
-
-        show_ors = st.checkbox("Show ORS routes", key="show_ors")
-        show_google = st.checkbox("Show Google routes", key="show_google")
-        show_markers = st.checkbox("Show depart / arrive markers", key="show_markers")
-
-        m = folium.Map(
-            location=[39.8283, -98.5795],
-            zoom_start=4,
-            tiles="OpenStreetMap"
-        )
-
-        bounds = []
-
-        for idx, loc in enumerate(locations):
-            bounds.append([loc["lat"], loc["lon"]])
-
-            is_house = loc["label"].strip().lower() == "house"
-
-            folium.Marker(
-                location=[loc["lat"], loc["lon"]],
-                popup=f"<b>{loc['label']}</b><br>{loc['address']}",
-                icon=folium.Icon(
-                    color="green" if is_house else "blue",
-                    icon="home" if is_house else "info-sign"
-                ),
-            ).add_to(m)
-
-        if bounds:
-            m.fit_bounds(bounds)
-
-        # Draw commute route if available
-        if st.session_state.get("commute_results"):
-            all_results = st.session_state.get("commute_results", {})
-
-            for provider, res in all_results.items():
-                segment_routes = res.get("segment_routes", [])
-
-                for seg in segment_routes:
-                    pts = seg["points"]
-                    if not pts:
-                        continue
-
-                    # Decide visibility per provider (ROUTES ONLY)
-                    show_route = (
-                            (provider == "ORS" and show_ors)
-                            or (provider == "Google" and show_google)
-                    )
-
-                    line_color = "#5E35B1" if provider == "ORS" else "#00695C"
-                    prefix = f"{provider}: "
-
-                    # --------------------
-                    # Route line
-                    # --------------------
-                    if show_route:
-                        folium.PolyLine(
-                            locations=pts,
-                            color=line_color,
-                            weight=5,
-                            opacity=0.85,
-                            tooltip=f"{prefix}{seg['from']} → {seg['to']}"
-                        ).add_to(m)
-
-                    # --------------------
-                    # Markers (independent)
-                    # --------------------
-                    if show_markers:
-                        # FROM marker
-                        folium.CircleMarker(
-                            location=pts[0],
-                            radius=6,
-                            color="#1565C0",
-                            fill=True,
-                            fill_color="#1565C0",
-                            fill_opacity=1.0,
-                            tooltip=f"{prefix}Depart: {seg['from']}",
-                            z_index_offset=1000,
-                        ).add_to(m)
-
-                        # TO marker
-                        folium.CircleMarker(
-                            location=pts[-1],
-                            radius=6,
-                            color="#C62828",
-                            fill=True,
-                            fill_color="#C62828",
-                            fill_opacity=1.0,
-                            tooltip=f"{prefix}Arrive: {seg['to']}",
-                            z_index_offset=1000,
-                        ).add_to(m)
-
-        st_folium(m, width=900, height=500)
-
-        # -----------------------------
-        # Dynamic route legend
-        # -----------------------------
-        legend_lines = ["<b>Route Legend</b><br>"]
-
-        if show_ors:
-            legend_lines.append(
-                "<span style='color:#5E35B1;'>━</span> ORS route (average traffic)<br>"
-            )
-
-        if show_google:
-            legend_lines.append(
-                "<span style='color:#00695C;'>━</span> Google route (traffic-aware)<br>"
-            )
-
-        if show_markers:
-            legend_lines.append(
-                "<span style='color:#1565C0;'>●</span> Depart &nbsp;&nbsp;"
-                "<span style='color:#C62828;'>●</span> Arrive"
-            )
-
-        st.markdown(
-            f"""
-        <div style="margin-top:8px; font-size:14px;">
-        {''.join(legend_lines)}
-        </div>
-        """,
-            unsafe_allow_html=True
-        )
-
-    # -------- TABLE COLUMN --------
     with table_col:
         st.subheader("Locations")
 
         if not locations:
             st.caption("No locations added yet.")
         else:
-            # Table header
             header_cols = st.columns([0.25, 0.55, 0.2])
             with header_cols[0]:
                 st.markdown("**Label**")
@@ -969,15 +1431,12 @@ with st.expander(
             for idx, loc in enumerate(locations):
                 row_cols = st.columns([0.25, 0.55, 0.2])
 
-                # ---- Label ----
                 with row_cols[0]:
                     st.write(loc["label"])
 
-                # ---- Address (single line, clipped) ----
                 with row_cols[1]:
                     st.caption(loc["address"])
 
-                # ---- Delete / Confirm ----
                 with row_cols[2]:
                     confirm_key = f"confirm_delete_{idx}"
 
@@ -993,20 +1452,18 @@ with st.expander(
                             args=(confirm_key,)
                         )
                     else:
-                        if st.session_state[confirm_key]:
-                            if st.button(
-                                    "Confirm",
-                                    key=f"confirm_{idx}",
-                                    type="primary"
-                            ):
-                                st.session_state["map_data"]["locations"].pop(idx)
-                                st.session_state.pop(confirm_key, None)
+                        if st.button(
+                                "Confirm",
+                                key=f"confirm_{idx}",
+                                type="primary"
+                        ):
+                            st.session_state["map_data"]["locations"].pop(idx)
+                            st.session_state.pop(confirm_key, None)
 
-                                count = len(st.session_state["map_data"]["locations"])
-                                st.session_state["map_badge"] = f"{count} locations"
-                                st.session_state["map_expanded"] = True
+                            count = len(st.session_state["map_data"]["locations"])
+                            st.session_state["map_badge"] = f"{count} locations"
 
-                                st.rerun()
+                            st.rerun()
 
 # =============================
 # Commute Section
@@ -1175,7 +1632,9 @@ with st.expander(
             "Select at least one stop (Include = true), "
             "then set Order (1, 2, 3...)."
         )
-        st.stop()
+        can_compute_commute = False
+    else:
+        can_compute_commute = True
 
     # Sort stops in visit order (deterministic)
     # Order is primary; Label breaks ties
@@ -1215,7 +1674,7 @@ with st.expander(
     # -------------------------------------------------
     compute = st.button("Compute Commute", type="primary")
 
-    if compute:
+    if compute and can_compute_commute:
         # -------------------------------------------------
         # Prepare route accumulation
         # -------------------------------------------------
@@ -1349,15 +1808,14 @@ with st.expander(
         }
 
         # ---------------------------------------
-        # Record desired layer defaults for NEXT rerun
+        # Record most recent provider + request layer defaults
+        # (apply just before checkboxes are created)
         # ---------------------------------------
         st.session_state["last_commute_provider"] = provider_key
-        st.session_state["last_commute_provider_applied"] = False
-        st.session_state["auto_show_markers"] = True
+        st.session_state["pending_layer_defaults"] = provider_key
 
-        # UI focus
-        st.session_state["commute_expanded"] = False
-        st.session_state["map_expanded"] = True
+        # Force rerun so checkboxes pick up state
+        st.rerun()
 
     # -------------------------------------------------
     # Display persisted results (if available)
@@ -1389,3 +1847,597 @@ with st.expander(
                 "Total Drive Time",
                 f"{res['total_s'] / 60.0:,.1f} min"
             )
+
+    if st.session_state.get("last_commute_provider"):
+        st.subheader("Commute Map")
+
+        # ---------------------------------------
+        # Apply layer defaults exactly once per compute,
+        # BEFORE widgets are instantiated
+        # ---------------------------------------
+        pending = st.session_state.pop("pending_layer_defaults", None)
+        if pending == "ORS":
+            st.session_state["show_ors"] = True
+            st.session_state["show_google"] = False
+            st.session_state["show_markers"] = True
+        elif pending == "Google":
+            st.session_state["show_google"] = True
+            st.session_state["show_ors"] = False
+            st.session_state["show_markers"] = True
+
+        show_ors = st.checkbox("Show ORS routes", key="show_ors")
+        show_google = st.checkbox("Show Google routes", key="show_google")
+        show_markers = st.checkbox("Show depart / arrive markers", key="show_markers")
+
+        m = folium.Map(
+            location=[39.8283, -98.5795],
+            zoom_start=4,
+            tiles="OpenStreetMap"
+        )
+
+        bounds = []
+
+        for loc in locations:
+            bounds.append([loc["lat"], loc["lon"]])
+            is_house = loc["label"].strip().lower() == "house"
+
+            folium.Marker(
+                location=[loc["lat"], loc["lon"]],
+                popup=f"<b>{loc['label']}</b><br>{loc['address']}",
+                icon=folium.Icon(
+                    color="green" if is_house else "blue",
+                    icon="home" if is_house else "info-sign"
+                ),
+            ).add_to(m)
+
+        if bounds:
+            m.fit_bounds(bounds)
+
+        for provider, res in st.session_state["commute_results"].items():
+            for seg in res.get("segment_routes", []):
+                pts = seg["points"]
+                if not pts:
+                    continue
+
+                show_route = (
+                        (provider == "ORS" and show_ors)
+                        or (provider == "Google" and show_google)
+                )
+
+                if show_route:
+                    folium.PolyLine(
+                        locations=pts,
+                        color="#5E35B1" if provider == "ORS" else "#00695C",
+                        weight=5,
+                        opacity=0.85,
+                        tooltip=f"{provider}: {seg['from']} → {seg['to']}",
+                    ).add_to(m)
+
+                if show_markers:
+                    folium.CircleMarker(
+                        location=pts[0],
+                        radius=6,
+                        color="#1565C0",
+                        fill=True,
+                        fill_color="#1565C0",
+                    ).add_to(m)
+
+                    folium.CircleMarker(
+                        location=pts[-1],
+                        radius=6,
+                        color="#C62828",
+                        fill=True,
+                        fill_color="#C62828",
+                    ).add_to(m)
+
+        st_folium(m, width=900, height=500)
+
+# =============================
+# Sun & Light Analysis
+# =============================
+with st.expander(
+    "☀️ Sun & Light Analysis",
+    expanded=st.session_state["sun_expanded"],
+):
+    st.subheader("Annual Sun Exposure")
+
+    with st.expander("ℹ️ How to read this chart"):
+        st.markdown(
+            """
+    ### What this chart shows
+
+    This diagram summarizes **the directions from which the sun reaches this property over the course of a year**.
+
+    Each colored wedge represents a **compass direction** (north, east, south, west, etc.) where sunlight is present at some point during the day.
+    
+    The sun generally rises in the east, moves across the southern sky, and sets in the west, with the exact angle shifting slightly between winter and summer.
+
+    ---
+
+    ### How the sun paths are calculated
+
+    - The house location is used to determine **local sunrise and sunset times**.
+    - For three representative dates:
+      - **Winter** (December 21)
+      - **Equinox** (March 20)
+      - **Summer** (June 21)
+    - The sun’s position is sampled **every 10 minutes** while it is above the horizon.
+    - Each sun position contributes to a **5° compass direction bin**.
+    - For each direction, the season with the **most sun presence** becomes the dominant color.
+
+    This ensures each direction is assigned to **one clear season**, avoiding confusing overlaps.
+
+    ---
+
+    ### What the colors mean
+
+    - **Blue (Winter)** → Sun most often comes from this direction during Dec–Feb  
+    - **Green (Equinox)** → Sun most often comes from this direction during spring & fall  
+    - **Orange (Summer)** → Sun most often comes from this direction during Jun–Aug  
+
+    The legend below the chart maps **months to seasons**.
+
+    ---
+
+    ### How to interpret gaps
+
+    If part of the circle has **no color**, it means:
+    - The sun **never rises above the horizon** in that direction at this location,
+    - At any time of year.
+
+    This is common for **north-facing directions** in the Northern Hemisphere.
+
+    ---
+
+    ### What this chart is (and is not)
+
+    ✅ Shows **directional sun exposure trends**  
+    ✅ Helps compare **front vs back vs side exposure**  
+    ✅ Useful for understanding **seasonal lighting patterns**
+
+    ❌ Does not show exact sunlight hours  
+    ❌ Does not account for trees or buildings  
+    ❌ Does not simulate shadows
+
+    ---
+    
+    ### About imagery dates
+    
+    The aerial image shown is provided by a satellite imagery service and is part of a **composite map mosaic**.
+    
+    - The image is **not captured at a single moment in time**
+    - Different parts of the image may come from **different capture dates**
+    - Imagery is processed, corrected, and blended before being published
+    
+    Because of this, a single, exact “image date” does **not exist** and would be misleading to display.
+    
+    The imagery is used only for **visual context**.  
+    All sun angle and seasonal calculations are based on **precise astronomical models** and the property’s geographic location.
+    
+    ---
+    
+    These refinements may be added in future versions.
+    """
+        )
+
+    overlay_alpha = st.slider(
+        "Overlay transparency",
+        min_value=0.05,
+        max_value=0.80,
+        value=0.60,
+        step=0.05,
+        help="Controls visibility of seasonal sun coverage overlay.",
+    )
+
+
+    house = _get_loc_by_label(
+        st.session_state["map_data"]["locations"],
+        "House",
+    )
+
+    if house:
+        tz_name = "America/New_York"  # derived implicitly for prototype
+
+        base_img = get_static_osm_image(
+            house["lat"],
+            house["lon"],
+            zoom=19,
+            size=800,
+        )
+
+        azimuths = compute_season_azimuths(
+            house["lat"],
+            house["lon"],
+            tz_name,
+        )
+
+        overlay = draw_solar_overlay(
+            base_img,
+            azimuths,
+            base_alpha=overlay_alpha,
+        )
+
+        st.image(overlay, width="stretch")
+
+        legend_cols = st.columns(3)
+
+        with legend_cols[0]:
+            st.markdown(
+                "<span style='display:inline-block;width:16px;height:16px;"
+                "background:#4FC3F7;border-radius:3px'></span> "
+                "**Winter**<br>Dec, Jan, Feb",
+                unsafe_allow_html=True,
+            )
+
+        with legend_cols[1]:
+            st.markdown(
+                "<span style='display:inline-block;width:16px;height:16px;"
+                "background:#81C784;border-radius:3px'></span> "
+                "**Equinox**<br>Mar–May, Sep–Nov",
+                unsafe_allow_html=True,
+            )
+
+        with legend_cols[2]:
+            st.markdown(
+                "<span style='display:inline-block;width:16px;height:16px;"
+                "background:#FFB74D;border-radius:3px'></span> "
+                "**Summer**<br>Jun, Jul, Aug",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            """
+    **Seasonal Mapping**
+    
+    - **Winter** → Dec, Jan, Feb  
+    - **Equinox** → Mar, Apr, May & Sep, Oct, Nov  
+    - **Summer** → Jun, Jul, Aug
+    """
+        )
+
+# =============================
+# Disaster Risk & Hazard Mapping
+# =============================
+with st.expander(
+    "🌪️ Disaster Risk & Hazard Mapping",
+    expanded=st.session_state["disaster_expanded"],
+):
+    st.subheader("Disaster Map (Home of Record)")
+
+    locations = st.session_state["map_data"]["locations"]
+    house = _get_loc_by_label(locations, "House")
+
+    if not house:
+        st.warning("Add a location labeled **House** to enable disaster mapping.")
+    else:
+        radius_miles = st.slider(
+            "Search radius (miles)",
+            min_value=1,
+            max_value=50,
+            step=1,
+            key="disaster_radius_miles",
+        )
+
+        # ---------------------------------------
+        # Planned hazard layers (toggle to enable)
+        # ---------------------------------------
+        st.markdown("### Planned hazard layers (toggle to enable)")
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.checkbox("Flood zones (FEMA)", key="hz_flood")
+            st.checkbox("Wildfire risk", key="hz_wildfire")
+            st.checkbox("Earthquake fault proximity", key="hz_earthquake")
+            st.checkbox("Hurricane / wind exposure", key="hz_wind")
+
+        with c2:
+            st.checkbox("Heat risk", key="hz_heat")
+            st.checkbox("Historical disaster declarations", key="hz_disaster_history")
+            st.checkbox("Previous land use history (County / Census)", key="hz_land_use")
+
+        st.divider()
+
+        # ---------------------------------------
+        # Disaster map
+        # ---------------------------------------
+        m = folium.Map(
+            location=[house["lat"], house["lon"]],
+            zoom_start=13,
+            tiles="OpenStreetMap",
+        )
+
+        folium.Marker(
+            location=[house["lat"], house["lon"]],
+            popup=f"<b>House</b><br>{house['address']}",
+            icon=folium.Icon(color="red", icon="home"),
+        ).add_to(m)
+
+        # ---------------------------------------
+        # Build search radius geometry (single source of truth)
+        # ---------------------------------------
+        project = pyproj.Transformer.from_crs(
+            "EPSG:4326", "EPSG:3857", always_xy=True
+        ).transform
+
+        house_point_m = transform(project, Point(house["lon"], house["lat"]))
+        radius_meters = radius_miles * 1609.34
+
+        # THIS must exist before any use
+        search_area = house_point_m.buffer(radius_meters)
+
+        # ---------------------------------------
+        # Draw exact search radius (same geometry as clip)
+        # ---------------------------------------
+        search_area_latlon = transform(
+            pyproj.Transformer.from_crs(
+                "EPSG:3857", "EPSG:4326", always_xy=True
+            ).transform,
+            search_area,
+        )
+
+        folium.GeoJson(
+            search_area_latlon.__geo_interface__,
+            name=f"{radius_miles} mile search radius",
+            style_function=lambda _: {
+                "color": "#1565C0",
+                "weight": 2,
+                "fill": False,
+                "dashArray": "6,6",
+            },
+            control=False,  # radius is informational, not a toggle
+        ).add_to(m)
+
+        # ---------------------------------------
+        # FEMA Flood Hazard Zones (NFHL FeatureServer)
+        # ---------------------------------------
+        # NOTE:
+        # FEMA flood data is cached per search radius.
+        # Map panning/zooming does NOT trigger refetches.
+        if not st.session_state.get("hz_flood"):
+            st.session_state.pop("fema_flood_geojson", None)
+            st.session_state.pop("fema_radius_key", None)
+
+        if not st.session_state.get("hz_wildfire"):
+            st.session_state.pop("wildfire_geoms", None)
+
+        if st.session_state.get("hz_flood"):
+            # ---------------------------------------
+            # Build radius-based bounding box (GIS-safe)
+            # ---------------------------------------
+            meters_per_degree_lat = 111_320
+            meters_per_degree_lon = 111_320 * math.cos(math.radians(house["lat"]))
+
+            delta_lat = radius_miles * 1609.34 / meters_per_degree_lat
+            delta_lon = radius_miles * 1609.34 / meters_per_degree_lon
+
+            bbox = (
+                house["lon"] - delta_lon,
+                house["lat"] - delta_lat,
+                house["lon"] + delta_lon,
+                house["lat"] + delta_lat,
+            )
+
+            bbox_key = (round(radius_miles, 2),)
+
+            # ---------------------------------------
+            # Cache FEMA fetch by radius ONLY
+            # ---------------------------------------
+            if (
+                    "fema_flood_geojson" not in st.session_state
+                    or st.session_state.get("fema_radius_key") != bbox_key
+            ):
+                st.session_state["fema_flood_geojson"] = fetch_fema_flood_zones(bbox)
+                st.session_state["fema_radius_key"] = bbox_key
+
+            flood_geojson = st.session_state["fema_flood_geojson"]
+
+            zone_groups = defaultdict(list)
+
+            # ---------------------------------------
+            # Clip FEMA features to circular radius
+            # ---------------------------------------
+            zone_groups = defaultdict(list)
+
+            for feature in flood_geojson["features"]:
+                props = feature.get("properties")
+                geom = feature.get("geometry")
+
+                if not props or not geom:
+                    continue
+
+                polygon_m = transform(project, shape(geom))
+
+                if polygon_m.intersects(search_area):
+                    clipped_geom = polygon_m.intersection(search_area)
+
+                    if not clipped_geom.is_empty:
+                        zone = props.get("FLD_ZONE")
+                        if zone:
+                            clipped_feature = {
+                                "type": "Feature",
+                                "properties": props,
+                                "geometry": transform(
+                                    pyproj.Transformer.from_crs(
+                                        "EPSG:3857", "EPSG:4326", always_xy=True
+                                    ).transform,
+                                    clipped_geom,
+                                ).__geo_interface__,
+                            }
+
+                            zone_groups[zone].append(clipped_feature)
+
+            for zone, features in zone_groups.items():
+                folium.GeoJson(
+                    {
+                        "type": "FeatureCollection",
+                        "features": features,
+                    },
+                    name=f"Flood Zone {zone}",
+                    style_function=flood_zone_style,
+                    tooltip=folium.GeoJsonTooltip(
+                        fields=["FLD_ZONE", "SFHA_TF"],
+                        aliases=["Flood Zone", "SFHA"],
+                        sticky=True,
+                    ),
+                    control=True,  # enables legend toggle
+                    show=True if zone != "X" else False,  # hide Zone X by default
+                ).add_to(m)
+
+            folium.LayerControl(
+                collapsed=False,
+                position="topright",
+            ).add_to(m)
+
+        if st.session_state.get("hz_wildfire"):
+            if "wildfire_geoms" not in st.session_state:
+                kml_bytes = fetch_wildfire_kml()
+                st.session_state["wildfire_geoms"] = parse_kml_polygons(kml_bytes)
+
+            wildfire_features = []
+
+            for geom in st.session_state["wildfire_geoms"]:
+                geom_m = transform(project, geom)
+
+                if geom_m.intersects(search_area):
+                    clipped = geom_m.intersection(search_area)
+
+                    if not clipped.is_empty:
+                        wildfire_features.append({
+                            "type": "Feature",
+                            "properties": {},
+                            "geometry": transform(
+                                pyproj.Transformer.from_crs(
+                                    "EPSG:3857", "EPSG:4326", always_xy=True
+                                ).transform,
+                                clipped,
+                            ).__geo_interface__,
+                        })
+
+            if wildfire_features:
+                folium.GeoJson(
+                    {
+                        "type": "FeatureCollection",
+                        "features": wildfire_features,
+                    },
+                    name="Historical Wildfires (MTBS)",
+                    style_function=lambda _: {
+                        "color": "#D84315",
+                        "weight": 1.2,
+                        "fillColor": "#FF8A65",
+                        "fillOpacity": 0.35,
+                    },
+                    control=True,
+                ).add_to(m)
+
+        st_folium(
+            m,
+            width=900,
+            height=500,
+            returned_objects=[],
+        )
+
+        if st.session_state.get("hz_flood"):
+            st.caption("Flood data source: FEMA National Flood Hazard Layer (NFHL)")
+
+        st.divider()
+        st.markdown("### Enabled layers:")
+
+        enabled = []
+
+        flood_geojson = st.session_state.get("fema_flood_geojson")
+
+        if st.session_state.get("hz_flood") and flood_geojson and flood_geojson["features"]:
+            house_zone, house_sfha = flood_zone_at_point(
+                flood_geojson,
+                house["lat"],
+                house["lon"],
+            )
+
+            if house_zone:
+                zone_info = FEMA_ZONE_EXPLANATIONS.get(house_zone)
+
+                if zone_info:
+                    st.markdown(
+                        f"""
+        ### {zone_info['title']}
+
+        - **Summary:** {zone_info['summary']}
+        - **Flood insurance:** {zone_info['insurance']}
+        - **SFHA:** {"Yes" if house_sfha == "T" else "No"}
+        - **Determination:** Flood zone determined at the house location.
+        """,
+                        unsafe_allow_html=True,
+                    )
+
+        if st.session_state.get("hz_wildfire") and wildfire_features:
+            st.markdown(
+                f"""
+        ### Historical Wildfire Context
+
+        - **Historical wildfire perimeters detected within {radius_miles} miles**
+        - These represent **past burned areas**, not current fire conditions
+        - Presence does **not** indicate future wildfire likelihood
+
+        Wildfire data source: USGS / USDA MTBS
+        """
+            )
+
+        nearby_zones = set()
+
+        flood_geojson = st.session_state.get("fema_flood_geojson")
+
+        if flood_geojson:
+            for feature in flood_geojson["features"]:
+                props = feature.get("properties")
+                geom = feature.get("geometry")
+
+                if not props or not geom:
+                    continue
+
+                polygon_m = transform(project, shape(geom))
+
+                # True spatial test (not distance-only)
+                if polygon_m.intersects(search_area):
+                    zone = props.get("FLD_ZONE")
+                    if zone:
+                        nearby_zones.add(zone)
+
+        nearby_zones = sorted(nearby_zones)
+
+        descriptions = [
+            f"{zone_descriptions[z]} (Zone {z})"
+            for z in nearby_zones
+            if z in zone_descriptions and z != house_zone
+        ]
+
+        if descriptions:
+            st.markdown(
+                f"""
+            <strong>Nearby flood risk context (within {radius_miles} miles):</strong><br>
+            Surrounding areas include {", ".join(sorted(set(descriptions)))}.<br><br>
+            These nearby flood zones do not change the flood classification at this property.
+            """,
+                unsafe_allow_html=True,
+            )
+
+        if st.session_state["hz_wildfire"]:
+            enabled.append("Wildfire risk")
+
+        if st.session_state["hz_earthquake"]:
+            enabled.append("Earthquake fault proximity")
+
+        if st.session_state["hz_wind"]:
+            enabled.append("Hurricane / wind exposure")
+
+        if st.session_state["hz_heat"]:
+            enabled.append("Heat risk")
+
+        if st.session_state["hz_disaster_history"]:
+            enabled.append("Historical disaster declarations")
+
+        if st.session_state["hz_land_use"]:
+            enabled.append("Previous land use history (County / Census-level)")
+
+        for name in enabled:
+            st.info(f"**{name}** is enabled — data integration will be wired in next.")
