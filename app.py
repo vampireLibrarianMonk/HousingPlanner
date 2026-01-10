@@ -33,6 +33,9 @@ import pyproj
 
 from collections import defaultdict
 
+from zipfile import ZipFile
+from io import BytesIO
+
 from fastkml import kml
 
 FEMA_FEATURE_URL = (
@@ -832,34 +835,80 @@ def flood_zone_style(feature):
 
 
 @st.cache_data(show_spinner=False, ttl=86400)
-def fetch_wildfire_kml():
+def fetch_mtbs_kmz(bbox):
+    west, south, east, north = bbox
+
     params = {
-        "layers": "63",  # Burned Area Boundaries (All Years)
-        "layerOptions": "vector",  # vectors as vectors
-        "f": "kml",
+        "LayerIDs": "63",        # Burned Area Boundaries (All Years)
+        "Composite": "false",
+        "FORMAT": "kmz",
+        "BBOX": f"{west},{south},{east},{north}",
+        "BBOXSR": "4326",
     }
 
-    r = requests.get(WILDFIRE_KML_URL, params=params, timeout=60)
+    r = requests.get(
+        "https://apps.fs.usda.gov/arcx/services/EDW/EDW_MTBS_01/MapServer/KmlServer",
+        params=params,
+        timeout=45,
+    )
     r.raise_for_status()
 
     return r.content
 
 
-def parse_kml_polygons(kml_bytes):
-    k = kml.KML()
-    k.from_string(kml_bytes)
+import xml.etree.ElementTree as ET
+from zipfile import ZipFile
+from io import BytesIO
 
-    features = []
+def extract_geometry_kml(kmz_bytes):
+    with ZipFile(BytesIO(kmz_bytes)) as z:
+        # 1️⃣ Prefer doc.kml if present
+        for name in z.namelist():
+            if name.lower().endswith("doc.kml"):
+                return z.read(name).decode("utf-8", errors="ignore")
+
+        # 2️⃣ Otherwise, find KML that contains Placemark elements
+        for name in z.namelist():
+            if not name.lower().endswith(".kml"):
+                continue
+
+            text = z.read(name).decode("utf-8", errors="ignore")
+
+            try:
+                root = ET.fromstring(text)
+            except ET.ParseError:
+                continue
+
+            # Namespace-agnostic Placemark search
+            if root.findall(".//{*}Placemark"):
+                return text
+
+    raise RuntimeError("No geometry KML found in KMZ")
+
+
+
+def parse_kml_geometries(kml_text):
+    k = kml.KML()
+    k.from_string(kml_text.encode("utf-8"))
+
+    geoms = []
 
     def walk(obj):
-        for f in getattr(obj, "features", lambda: [])():
+        feats = getattr(obj, "features", [])
+        if callable(feats):
+            feats = feats()
+
+        for f in feats:
             if hasattr(f, "geometry") and f.geometry:
-                features.append(f.geometry)
+                geoms.append(f.geometry)
             walk(f)
 
-    walk(next(iter(k.features())))
+    # k.features is a LIST in modern fastkml
+    for top in k.features:
+        walk(top)
 
-    return features
+    return geoms
+
 
 # -----------------------------
 # Session State
@@ -2200,26 +2249,27 @@ with st.expander(
 
         if not st.session_state.get("hz_wildfire"):
             st.session_state.pop("wildfire_geoms", None)
+            st.session_state.pop("wildfire_radius_key", None)
+
+        # ---------------------------------------
+        # Build radius-based bounding box (GIS-safe)
+        # ---------------------------------------
+        meters_per_degree_lat = 111_320
+        meters_per_degree_lon = 111_320 * math.cos(math.radians(house["lat"]))
+
+        delta_lat = radius_miles * 1609.34 / meters_per_degree_lat
+        delta_lon = radius_miles * 1609.34 / meters_per_degree_lon
+
+        bbox = (
+            house["lon"] - delta_lon,
+            house["lat"] - delta_lat,
+            house["lon"] + delta_lon,
+            house["lat"] + delta_lat,
+        )
+
+        bbox_key = (round(radius_miles, 2),)
 
         if st.session_state.get("hz_flood"):
-            # ---------------------------------------
-            # Build radius-based bounding box (GIS-safe)
-            # ---------------------------------------
-            meters_per_degree_lat = 111_320
-            meters_per_degree_lon = 111_320 * math.cos(math.radians(house["lat"]))
-
-            delta_lat = radius_miles * 1609.34 / meters_per_degree_lat
-            delta_lon = radius_miles * 1609.34 / meters_per_degree_lon
-
-            bbox = (
-                house["lon"] - delta_lon,
-                house["lat"] - delta_lat,
-                house["lon"] + delta_lon,
-                house["lat"] + delta_lat,
-            )
-
-            bbox_key = (round(radius_miles, 2),)
-
             # ---------------------------------------
             # Cache FEMA fetch by radius ONLY
             # ---------------------------------------
@@ -2290,9 +2340,16 @@ with st.expander(
             ).add_to(m)
 
         if st.session_state.get("hz_wildfire"):
-            if "wildfire_geoms" not in st.session_state:
-                kml_bytes = fetch_wildfire_kml()
-                st.session_state["wildfire_geoms"] = parse_kml_polygons(kml_bytes)
+            bbox_key = (round(radius_miles, 2),)
+
+            if (
+                    "wildfire_geoms" not in st.session_state
+                    or st.session_state.get("wildfire_radius_key") != bbox_key
+            ):
+                kmz = fetch_mtbs_kmz(bbox)
+                kml_text = extract_geometry_kml(kmz)
+                st.session_state["wildfire_geoms"] = parse_kml_geometries(kml_text)
+                st.session_state["wildfire_radius_key"] = bbox_key
 
             wildfire_features = []
 
@@ -2370,18 +2427,31 @@ with st.expander(
                         unsafe_allow_html=True,
                     )
 
-        if st.session_state.get("hz_wildfire") and wildfire_features:
-            st.markdown(
-                f"""
+        if st.session_state.get("hz_wildfire"):
+            if wildfire_features:
+                st.markdown(
+                    f"""
         ### Historical Wildfire Context
 
-        - **Historical wildfire perimeters detected within {radius_miles} miles**
+        - **One or more historical wildfire perimeters intersect the area within {radius_miles} miles**
         - These represent **past burned areas**, not current fire conditions
         - Presence does **not** indicate future wildfire likelihood
 
         Wildfire data source: USGS / USDA MTBS
         """
-            )
+                )
+            else:
+                st.markdown(
+                    f"""
+        ### Historical Wildfire Context
+
+        - **No historical wildfire perimeters intersect the area within {radius_miles} miles**
+        - This suggests **low recorded large-fire activity** in this region
+        - Absence of recorded perimeters does **not guarantee zero wildfire risk**
+
+        Wildfire data source: USGS / USDA MTBS
+        """
+                )
 
         nearby_zones = set()
 
