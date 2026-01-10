@@ -33,10 +33,8 @@ import pyproj
 
 from collections import defaultdict
 
-from zipfile import ZipFile
-from io import BytesIO
-
-from fastkml import kml
+from lxml import etree
+from shapely.geometry import Polygon
 
 FEMA_FEATURE_URL = (
     "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
@@ -886,28 +884,34 @@ def extract_geometry_kml(kmz_bytes):
     raise RuntimeError("No geometry KML found in KMZ")
 
 
+def parse_kml_geometries(kml_text: str):
+    ns = {"kml": "http://www.opengis.net/kml/2.2"}
+    root = etree.fromstring(kml_text.encode("utf-8"))
 
-def parse_kml_geometries(kml_text):
-    k = kml.KML()
-    k.from_string(kml_text.encode("utf-8"))
+    polygons = []
 
-    geoms = []
+    for placemark in root.findall(".//kml:Placemark", ns):
+        for poly in placemark.findall(".//kml:Polygon", ns):
 
-    def walk(obj):
-        feats = getattr(obj, "features", [])
-        if callable(feats):
-            feats = feats()
+            coords = poly.find(
+                ".//kml:outerBoundaryIs/kml:LinearRing/kml:coordinates",
+                ns,
+            )
+            if coords is None or not coords.text:
+                continue
 
-        for f in feats:
-            if hasattr(f, "geometry") and f.geometry:
-                geoms.append(f.geometry)
-            walk(f)
+            points = []
+            for coord in coords.text.strip().split():
+                lon, lat, *_ = coord.split(",")
+                points.append((float(lon), float(lat)))
 
-    # k.features is a LIST in modern fastkml
-    for top in k.features:
-        walk(top)
+            if len(points) >= 4:
+                try:
+                    polygons.append(Polygon(points))
+                except Exception:
+                    pass
 
-    return geoms
+    return polygons
 
 
 # -----------------------------
@@ -2267,7 +2271,11 @@ with st.expander(
             house["lat"] + delta_lat,
         )
 
-        bbox_key = (round(radius_miles, 2),)
+        bbox_key = (
+            round(house["lat"], 4),
+            round(house["lon"], 4),
+            round(radius_miles, 2),
+        )
 
         if st.session_state.get("hz_flood"):
             # ---------------------------------------
@@ -2340,36 +2348,54 @@ with st.expander(
             ).add_to(m)
 
         if st.session_state.get("hz_wildfire"):
-            bbox_key = (round(radius_miles, 2),)
-
             if (
                     "wildfire_geoms" not in st.session_state
                     or st.session_state.get("wildfire_radius_key") != bbox_key
             ):
                 kmz = fetch_mtbs_kmz(bbox)
                 kml_text = extract_geometry_kml(kmz)
-                st.session_state["wildfire_geoms"] = parse_kml_geometries(kml_text)
+
+                geoms = parse_kml_geometries(kml_text)
+
+                st.session_state["wildfire_geoms"] = geoms
                 st.session_state["wildfire_radius_key"] = bbox_key
 
             wildfire_features = []
 
+            to_3857 = pyproj.Transformer.from_crs(
+                "EPSG:4326",
+                "EPSG:3857",
+                always_xy=True,
+            ).transform
+
             for geom in st.session_state["wildfire_geoms"]:
-                geom_m = transform(project, geom)
 
-                if geom_m.intersects(search_area):
-                    clipped = geom_m.intersection(search_area)
+                geom_m = transform(to_3857, geom)
 
-                    if not clipped.is_empty:
-                        wildfire_features.append({
-                            "type": "Feature",
-                            "properties": {},
-                            "geometry": transform(
-                                pyproj.Transformer.from_crs(
-                                    "EPSG:3857", "EPSG:4326", always_xy=True
-                                ).transform,
-                                clipped,
-                            ).__geo_interface__,
-                        })
+                if geom_m.is_empty:
+                    continue
+
+                if not geom_m.is_valid:
+                    geom_m = geom_m.buffer(0)
+
+                if not geom_m.intersects(search_area):
+                    continue
+
+                clipped = geom_m.intersection(search_area)
+
+                if clipped.is_empty:
+                    continue
+
+                wildfire_features.append({
+                    "type": "Feature",
+                    "properties": {},
+                    "geometry": transform(
+                        pyproj.Transformer.from_crs(
+                            "EPSG:3857", "EPSG:4326", always_xy=True
+                        ).transform,
+                        clipped,
+                    ).__geo_interface__,
+                })
 
             if wildfire_features:
                 folium.GeoJson(
