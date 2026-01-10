@@ -1,40 +1,61 @@
+# =============================
+# Standard library
+# =============================
+import os
+import io
+import math
 import time
 from dataclasses import dataclass
-from datetime import date
+from collections import defaultdict
+from datetime import (
+    date,
+    datetime,
+    timedelta,
+    timezone,
+)
+from zoneinfo import ZoneInfo
+from zipfile import ZipFile
+from io import BytesIO
+import xml.etree.ElementTree as ET
 
-import polyline
+# =============================
+# Third-party: Core app & data
+# =============================
 import streamlit as st
+import pandas as pd
+import requests
+import polyline
+from dotenv import load_dotenv
 
+# =============================
+# Mapping & geospatial
+# =============================
 import folium
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 
-import os
-from dotenv import load_dotenv
+import pyproj
+from shapely.geometry import (
+    shape,
+    Point,
+    Polygon,
+)
+from shapely.ops import transform
 
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-
+# =============================
+# Astronomy / solar analysis
+# =============================
 from astral import LocationInfo
 from astral.sun import sun, azimuth
 
-import requests
-import pandas as pd
-
-from PIL import Image, ImageDraw
-import math
-import io
-
-from PIL import ImageFont
-
-from shapely.geometry import shape, Point
-from shapely.ops import transform
-import pyproj
-
-from collections import defaultdict
-
-from lxml import etree
-from shapely.geometry import Polygon
+# =============================
+# Imaging / rendering
+# =============================
+from PIL import (
+    Image,
+    ImageDraw,
+    ImageFont,
+)
 
 FEMA_FEATURE_URL = (
     "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
@@ -227,9 +248,9 @@ def render_bankrate_math():
 
 **Monthly Principal & Interest**
 
-\[
+\\[
 M = P \times \frac{r(1+r)^n}{(1+r)^n - 1}
-\]
+\\]
 
 Where:
 - **P** = Loan principal  
@@ -255,9 +276,9 @@ def render_nerdwallet_math():
 
 **Monthly Principal & Interest**
 
-\[
+\\[
 M = P \\times \\frac{r(1+r)^n}{(1+r)^n - 1}
-\]
+\\]
 
 Where:
 - **P** = Loan principal  
@@ -854,10 +875,6 @@ def fetch_mtbs_kmz(bbox):
     return r.content
 
 
-import xml.etree.ElementTree as ET
-from zipfile import ZipFile
-from io import BytesIO
-
 def extract_geometry_kml(kmz_bytes):
     with ZipFile(BytesIO(kmz_bytes)) as z:
         # 1️⃣ Prefer doc.kml if present
@@ -885,12 +902,32 @@ def extract_geometry_kml(kmz_bytes):
 
 
 def parse_kml_geometries(kml_text: str):
+    """
+    Parse MTBS KML into a list of dicts:
+
+    [
+        {
+            "geometry": shapely.geometry.Polygon,
+            "fire_year": int | None,
+            "fire_name": str | None,
+            "fire_id": str | None,
+        },
+        ...
+    ]
+
+    Geometry + metadata are bound per Placemark (GIS-safe).
+    """
     ns = {"kml": "http://www.opengis.net/kml/2.2"}
     root = etree.fromstring(kml_text.encode("utf-8"))
 
-    polygons = []
+    features = []
 
-    for placemark in root.findall(".//kml:Placemark", ns):
+    # Extract metadata ONCE, in Placemark order
+    metadata = extract_mtbs_fire_metadata(kml_text)
+
+    placemarks = root.findall(".//kml:Placemark", ns)
+
+    for placemark, meta in zip(placemarks, metadata):
         for poly in placemark.findall(".//kml:Polygon", ns):
 
             coords = poly.find(
@@ -905,13 +942,96 @@ def parse_kml_geometries(kml_text: str):
                 lon, lat, *_ = coord.split(",")
                 points.append((float(lon), float(lat)))
 
-            if len(points) >= 4:
-                try:
-                    polygons.append(Polygon(points))
-                except Exception:
-                    pass
+            if len(points) < 4:
+                continue
 
-    return polygons
+            try:
+                geom = Polygon(points)
+            except Exception:
+                continue
+
+            features.append({
+                "geometry": geom,
+                "fire_year": meta["fire_year"],
+                "fire_name": meta["fire_name"],
+                "fire_id": meta["fire_id"],
+            })
+
+    return features
+
+from bs4 import BeautifulSoup
+from lxml import etree
+import html
+
+def extract_mtbs_fire_metadata(kml_text: str):
+    """
+    Extract YEAR, FIRE_NAME, and FIRE_ID from MTBS Placemark <description> HTML.
+
+    Returns a list of dicts aligned 1:1 with Placemark order:
+    [
+        {"fire_year": int | None, "fire_name": str | None, "fire_id": str | None},
+        ...
+    ]
+
+    Read-only helper. Does NOT affect geometry parsing.
+    """
+    ns = {"kml": "http://www.opengis.net/kml/2.2"}
+    root = etree.fromstring(kml_text.encode("utf-8"))
+
+    results = []
+
+    placemarks = root.findall(".//kml:Placemark", ns)
+    for pm in placemarks:
+        fire_year = None
+        fire_name = None
+        fire_id = None
+
+        desc = pm.find("kml:description", ns)
+        if desc is not None:
+            html_text = html.unescape(
+                etree.tostring(desc, method="html", encoding="unicode")
+            )
+            soup = BeautifulSoup(html_text, "html.parser")
+            tds = soup.find_all("td")
+
+            # MTBS description is a 2-column table: label td -> value td
+            for i, td in enumerate(tds):
+                label = td.get_text(strip=True)
+
+                if i + 1 >= len(tds):
+                    continue
+
+                value = tds[i + 1].get_text(strip=True)
+
+                if label == "YEAR":
+                    try:
+                        fire_year = int(value)
+                    except ValueError:
+                        pass
+
+                elif label == "FIRE_NAME":
+                    fire_name = value
+
+                elif label == "FIRE_ID":
+                    fire_id = value
+
+        results.append({
+            "fire_year": fire_year,
+            "fire_name": fire_name,
+            "fire_id": fire_id,
+        })
+
+    return results
+
+
+def wildfire_recency_bucket(year: int) -> str:
+    age = datetime.now().year - year
+    if age <= 10:
+        return "≤10 years"
+    elif age <= 20:
+        return "10–20 years"
+    else:
+        return ">20 years"
 
 
 # -----------------------------
@@ -919,9 +1039,13 @@ def parse_kml_geometries(kml_text: str):
 # -----------------------------
 if "map_data" not in st.session_state:
     default_locations = [
+        # {
+        #     "label": "House",
+        #     "address": "4005 Ancient Oak Ct, Annandale, VA 22003",
+        # },
         {
             "label": "House",
-            "address": "4005 Ancient Oak Ct, Annandale, VA 22003",
+            "address": "6246 Skyway, Paradise, CA 95969",
         },
         {
             "label": "Work",
@@ -2342,33 +2466,49 @@ with st.expander(
                     show=True if zone != "X" else False,  # hide Zone X by default
                 ).add_to(m)
 
-            folium.LayerControl(
-                collapsed=False,
-                position="topright",
-            ).add_to(m)
-
         if st.session_state.get("hz_wildfire"):
+            # ---------------------------------------
+            # Fetch + cache wildfire items
+            # ---------------------------------------
             if (
-                    "wildfire_geoms" not in st.session_state
+                    "wildfire_items" not in st.session_state
                     or st.session_state.get("wildfire_radius_key") != bbox_key
             ):
                 kmz = fetch_mtbs_kmz(bbox)
                 kml_text = extract_geometry_kml(kmz)
 
-                geoms = parse_kml_geometries(kml_text)
+                # 🔑 geometry + metadata together (single source of truth)
+                wildfire_items = parse_kml_geometries(kml_text)
 
-                st.session_state["wildfire_geoms"] = geoms
+                # st.caption(
+                #     "DEBUG MTBS wildfire items sample: "
+                #     f"{wildfire_items[:3]}"
+                # )
+
+                st.session_state["wildfire_items"] = wildfire_items
                 st.session_state["wildfire_radius_key"] = bbox_key
 
+            # ---------------------------------------
+            # Build clipped wildfire features
+            # ---------------------------------------
             wildfire_features = []
 
             to_3857 = pyproj.Transformer.from_crs(
-                "EPSG:4326",
-                "EPSG:3857",
-                always_xy=True,
+                "EPSG:4326", "EPSG:3857", always_xy=True
             ).transform
 
-            for geom in st.session_state["wildfire_geoms"]:
+            to_4326 = pyproj.Transformer.from_crs(
+                "EPSG:3857", "EPSG:4326", always_xy=True
+            ).transform
+
+            for item in st.session_state["wildfire_items"]:
+                geom = item["geometry"]
+                fire_year = item["fire_year"]
+                fire_name = item["fire_name"]
+                fire_id = item["fire_id"]
+
+                if fire_year is None:
+                    continue
 
                 geom_m = transform(to_3857, geom)
 
@@ -2388,30 +2528,93 @@ with st.expander(
 
                 wildfire_features.append({
                     "type": "Feature",
-                    "properties": {},
-                    "geometry": transform(
-                        pyproj.Transformer.from_crs(
-                            "EPSG:3857", "EPSG:4326", always_xy=True
-                        ).transform,
-                        clipped,
-                    ).__geo_interface__,
+                    "properties": {
+                        "fire_year": fire_year,
+                        "fire_name": fire_name,
+                        "fire_id": fire_id,
+                    },
+                    "geometry": transform(to_4326, clipped).__geo_interface__,
                 })
 
+            # ---------------------------------------
+            # Group wildfire features by fire year
+            # ---------------------------------------
+            wildfire_by_year = defaultdict(list)
+
+            for feature in wildfire_features:
+                wildfire_by_year[
+                    feature["properties"]["fire_year"]
+                ].append(feature)
+
+            # ---------------------------------------
+            # Add one toggleable layer per fire year
+            # ---------------------------------------
+            if wildfire_by_year:
+                newest_year = max(wildfire_by_year)
+
+                for year, features in sorted(wildfire_by_year.items()):
+                    folium.GeoJson(
+                        {
+                            "type": "FeatureCollection",
+                            "features": features,
+                        },
+                        name=f"Wildfires – {year}",
+                        style_function=lambda _: {
+                            "color": "#D84315",
+                            "weight": 1.4,
+                            "dashArray": "4,4",
+                            "fillColor": "#FF8A65",
+                            "fillOpacity": 0.22,
+                        },
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=["fire_name", "fire_year", "fire_id"],
+                            aliases=["Fire Name", "Year", "MTBS ID"],
+                            sticky=True,
+                        ),
+                        control=True,
+                        show=(year == newest_year),  # newest on by default
+                    ).add_to(m)
+
+            # ---------------------------------------
+            # Wildfire legend (map overlay)
+            # ---------------------------------------
             if wildfire_features:
-                folium.GeoJson(
-                    {
-                        "type": "FeatureCollection",
-                        "features": wildfire_features,
-                    },
-                    name="Historical Wildfires (MTBS)",
-                    style_function=lambda _: {
-                        "color": "#D84315",
-                        "weight": 1.2,
-                        "fillColor": "#FF8A65",
-                        "fillOpacity": 0.35,
-                    },
-                    control=True,
-                ).add_to(m)
+                wildfire_legend_html = """
+                <div style="
+                    position: fixed;
+                    bottom: 35px;
+                    left: 35px;
+                    z-index: 9999;
+                    background: white;
+                    padding: 10px 14px;
+                    border-radius: 6px;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                    font-size: 13px;
+                ">
+                    <b>Historical Wildfires (MTBS)</b><br>
+                    <span style="
+                        display:inline-block;
+                        width:14px;
+                        height:14px;
+                        background:#FF8A65;
+                        border:1px solid #D84315;
+                        margin-right:6px;">
+                    </span>
+                    Burned Area Perimeter<br>
+                    <span style="font-size:11px;color:#555;">
+                        Historical large fires only
+                    </span>
+                </div>
+                """
+
+                m.get_root().html.add_child(
+                    folium.Element(wildfire_legend_html)
+                )
+
+        folium.LayerControl(
+            collapsed=False,
+            position="topright",
+        ).add_to(m)
 
         st_folium(
             m,
@@ -2455,11 +2658,21 @@ with st.expander(
 
         if st.session_state.get("hz_wildfire"):
             if wildfire_features:
+                fire_years = [
+                    f["properties"]["fire_year"]
+                    for f in wildfire_features
+                    if f["properties"].get("fire_year") is not None
+                ]
+
+                most_recent_year = max(fire_years) if fire_years else "unknown"
+                fire_count = len(wildfire_features)
+
                 st.markdown(
                     f"""
         ### Historical Wildfire Context
 
-        - **One or more historical wildfire perimeters intersect the area within {radius_miles} miles**
+        - **{fire_count} historical wildfire perimeter(s)** intersect the area within **{radius_miles} miles**
+        - **Most recent recorded fire year:** {most_recent_year}
         - These represent **past burned areas**, not current fire conditions
         - Presence does **not** indicate future wildfire likelihood
 
@@ -2471,8 +2684,8 @@ with st.expander(
                     f"""
         ### Historical Wildfire Context
 
-        - **No historical wildfire perimeters intersect the area within {radius_miles} miles**
-        - This suggests **low recorded large-fire activity** in this region
+        - **No mapped historical wildfire perimeters** intersect the area within **{radius_miles} miles**
+        - This reflects **recorded large-fire history only**
         - Absence of recorded perimeters does **not guarantee zero wildfire risk**
 
         Wildfire data source: USGS / USDA MTBS
@@ -2516,9 +2729,6 @@ with st.expander(
             """,
                 unsafe_allow_html=True,
             )
-
-        if st.session_state["hz_wildfire"]:
-            enabled.append("Wildfire risk")
 
         if st.session_state["hz_earthquake"]:
             enabled.append("Earthquake fault proximity")
