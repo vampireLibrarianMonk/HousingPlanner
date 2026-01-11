@@ -5,6 +5,7 @@ import os
 import io
 import math
 import time
+import re
 from dataclasses import dataclass
 from collections import defaultdict
 from datetime import (
@@ -57,6 +58,10 @@ from PIL import (
     ImageFont,
 )
 
+# =============================
+# URLS
+# =============================
+
 FEMA_FEATURE_URL = (
     "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
 )
@@ -64,6 +69,11 @@ FEMA_FEATURE_URL = (
 WILDFIRE_KML_URL = (
     "https://apps.fs.usda.gov/arcx/rest/services/"
     "EDW/EDW_MTBS_01/MapServer/generateKML"
+)
+
+# FEMA Open Data (v2) — county-level disaster declaration timeline
+FEMA_DISASTER_DECLARATIONS_URL = (
+    "https://www.fema.gov/api/open/v2/DisasterDeclarationsSummaries"
 )
 
 FEMA_ZONE_EXPLANATIONS = {
@@ -508,6 +518,77 @@ def geocode_once(address: str) -> tuple[float, float]:
     if not location:
         raise RuntimeError(f"Could not geocode address: {address}")
     return location.latitude, location.longitude
+
+
+def _state_abbrev_from_address_fallback(address: str) -> str | None:
+    """
+    Fallback: try to extract 'VA' from '..., VA 22003' style strings.
+    """
+    if not address:
+        return None
+    m = re.search(r",\s*([A-Z]{2})\s*\d{5}(-\d{4})?\s*$", address.strip())
+    return m.group(1) if m else None
+
+
+def _to_fema_designated_area_from_county(county: str) -> str:
+    """
+    Nominatim usually returns 'Fairfax County'. FEMA designatedArea uses:
+      'Fairfax (County)'
+    """
+    c = (county or "").strip()
+    c = re.sub(r"\s+County\s*$", "", c, flags=re.IGNORECASE)
+    return f"{c} (County)" if c else ""
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def reverse_geocode_county_state(lat: float, lon: float, address_fallback: str | None = None) -> tuple[str | None, str | None]:
+    """
+    Returns (county_name, state_abbrev) using Nominatim reverse-geocode.
+    """
+    geolocator = Nominatim(
+        user_agent="house-planner-prototype",
+        timeout=5,
+    )
+    loc = geolocator.reverse((lat, lon), language="en", exactly_one=True)
+    if not loc:
+        return None, _state_abbrev_from_address_fallback(address_fallback or "")
+
+    raw = getattr(loc, "raw", {}) or {}
+    addr = raw.get("address", {}) or {}
+
+    county = addr.get("county") or addr.get("state_district")
+    state_code = addr.get("state_code")  # often present in Nominatim
+    if not state_code:
+        state_code = _state_abbrev_from_address_fallback(address_fallback or "")
+
+    return county, state_code
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def fetch_fema_disaster_declarations(
+    state_abbrev: str,
+    designated_area: str,
+    top: int = 100,
+) -> dict:
+    """
+    FEMA Open Data v2:
+      /DisasterDeclarationsSummaries?$filter=state eq 'VA' and designatedArea eq 'Fairfax (County)'
+    Returns the full JSON payload including metadata.
+    """
+    if not state_abbrev or not designated_area:
+        return {"metadata": {"count": 0}, "DisasterDeclarationsSummaries": []}
+
+    # NOTE: FEMA's API uses OData-style parameters ($filter, $orderby, $top)
+    params = {
+        "$filter": f"state eq '{state_abbrev}' and designatedArea eq '{designated_area}'",
+        "$orderby": "declarationDate desc",
+        "$top": int(top),
+    }
+
+    r = requests.get(FEMA_DISASTER_DECLARATIONS_URL, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
 
 
 def decode_geometry(geometry, provider):
@@ -1039,14 +1120,14 @@ def wildfire_recency_bucket(year: int) -> str:
 # -----------------------------
 if "map_data" not in st.session_state:
     default_locations = [
-        # {
-        #     "label": "House",
-        #     "address": "4005 Ancient Oak Ct, Annandale, VA 22003",
-        # },
         {
             "label": "House",
-            "address": "6246 Skyway, Paradise, CA 95969",
+            "address": "4005 Ancient Oak Ct, Annandale, VA 22003",
         },
+        # {
+        #     "label": "House",
+        #     "address": "6246 Skyway, Paradise, CA 95969",
+        # },
         {
             "label": "Work",
             "address": "7500 GEOINT Dr, Springfield, VA 22150",
@@ -2312,13 +2393,12 @@ with st.expander(
         with c1:
             st.checkbox("Flood zones (FEMA)", key="hz_flood")
             st.checkbox("Wildfire risk", key="hz_wildfire")
-            st.checkbox("Earthquake fault proximity", key="hz_earthquake")
-            st.checkbox("Hurricane / wind exposure", key="hz_wind")
+            st.checkbox("Historical disaster declarations", key="hz_disaster_history")
 
         with c2:
             st.checkbox("Heat risk", key="hz_heat")
-            st.checkbox("Historical disaster declarations", key="hz_disaster_history")
-            st.checkbox("Previous land use history (County / Census)", key="hz_land_use")
+            st.checkbox("Earthquake fault proximity", key="hz_earthquake")
+            st.checkbox("Hurricane / wind exposure", key="hz_wind")
 
         st.divider()
 
@@ -2385,6 +2465,9 @@ with st.expander(
         if not st.session_state.get("hz_wildfire"):
             st.session_state.pop("wildfire_geoms", None)
             st.session_state.pop("wildfire_radius_key", None)
+
+        if not st.session_state.get("hz_disaster_history"):
+            st.session_state.pop("fema_disaster_history_last", None)
 
         # ---------------------------------------
         # Build radius-based bounding box (GIS-safe)
@@ -2699,6 +2782,90 @@ with st.expander(
         """
                 )
 
+        if st.session_state.get("hz_disaster_history"):
+            county, state_abbrev = reverse_geocode_county_state(
+                house["lat"],
+                house["lon"],
+                address_fallback=house.get("address"),
+            )
+
+            designated_area = _to_fema_designated_area_from_county(county or "")
+
+            data = fetch_fema_disaster_declarations(
+                state_abbrev=state_abbrev or "",
+                designated_area=designated_area,
+                top=100,
+            )
+
+            meta = data.get("metadata", {}) or {}
+            rows = data.get("DisasterDeclarationsSummaries", []) or []
+
+            if rows:
+                st.markdown(
+                    f"""
+### Historical Disaster Declarations (County-Level)
+
+- **County (FEMA designatedArea):** {designated_area}
+- **State:** {state_abbrev}
+- **Records returned:** {len(rows)}
+- **Sort:** declarationDate (newest → oldest)
+"""
+                )
+
+                df = pd.DataFrame(rows)
+
+                # Keep a clean “buyer-readable” view, while retaining raw metadata in an expander
+                keep_cols = [
+                    "declarationDate",
+                    "femaDeclarationString",
+                    "declarationType",
+                    "incidentType",
+                    "declarationTitle",
+                    "incidentBeginDate",
+                    "incidentEndDate",
+                    "disasterCloseoutDate",
+                    "fyDeclared",
+                    "paProgramDeclared",
+                    "iaProgramDeclared",
+                    "ihProgramDeclared",
+                    "hmProgramDeclared",
+                    "designatedArea",
+                    "state",
+                    "disasterNumber",
+                ]
+
+                existing = [c for c in keep_cols if c in df.columns]
+                df_view = df[existing].copy()
+
+                # Ensure newest-first (even if API changes behavior)
+                if "declarationDate" in df_view.columns:
+                    df_view["declarationDate"] = pd.to_datetime(df_view["declarationDate"], errors="coerce")
+                    df_view = df_view.sort_values("declarationDate", ascending=False)
+                    df_view["declarationDate"] = df_view["declarationDate"].dt.date.astype(str)
+
+                # Light cleanup for date columns
+                for c in ["incidentBeginDate", "incidentEndDate", "disasterCloseoutDate"]:
+                    if c in df_view.columns:
+                        d = pd.to_datetime(df_view[c], errors="coerce")
+                        df_view[c] = d.dt.date.astype("string")
+
+                st.dataframe(df_view, width="stretch", hide_index=True)
+
+                with st.expander("FEMA API metadata (debug)", expanded=False):
+                    st.json(meta)
+            else:
+                st.markdown(
+                    f"""
+### Historical Disaster Declarations (County-Level)
+
+- **County (FEMA designatedArea):** {designated_area or "Unknown"}
+- **State:** {state_abbrev or "Unknown"}
+- **Result:** No records returned from FEMA for this county filter.
+"""
+                )
+
+                nearby_zones = set()
+
         nearby_zones = set()
 
         flood_geojson = st.session_state.get("fema_flood_geojson")
@@ -2745,12 +2912,6 @@ with st.expander(
 
         if st.session_state["hz_heat"]:
             enabled.append("Heat risk")
-
-        if st.session_state["hz_disaster_history"]:
-            enabled.append("Historical disaster declarations")
-
-        if st.session_state["hz_land_use"]:
-            enabled.append("Previous land use history (County / Census-level)")
 
         for name in enabled:
             st.info(f"**{name}** is enabled — data integration will be wired in next.")
