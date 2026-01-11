@@ -1,3 +1,15 @@
+# ---------------------------------------------
+# Global state
+# ---------------------------------------------
+from state import init_state
+init_state()
+
+# ---------------------------------------------
+# Load environment variables (.env)
+# ---------------------------------------------
+from dotenv import load_dotenv
+load_dotenv()
+
 # =============================
 # Standard library
 # =============================
@@ -6,7 +18,6 @@ import io
 import math
 import time
 import re
-from dataclasses import dataclass
 from collections import defaultdict
 from datetime import (
     date,
@@ -26,7 +37,6 @@ import streamlit as st
 import pandas as pd
 import requests
 import polyline
-from dotenv import load_dotenv
 
 # =============================
 # Mapping & geospatial
@@ -57,6 +67,12 @@ from PIL import (
     ImageDraw,
     ImageFont,
 )
+
+from bs4 import BeautifulSoup
+from lxml import etree
+import html
+
+from locations.logic import _get_loc_by_label
 
 # =============================
 # URLS
@@ -124,199 +140,6 @@ FLOOD_ZONE_COLORS = {
     "D":  {"stroke": "#6A1B9A", "fill": "#CE93D8", "opacity": 0.35},  # Undetermined
     "X":  {"stroke": "#1B5E20", "fill": "#A5D6A7", "opacity": 0.18},  # Low
 }
-
-
-# ---------------------------------------------
-# Load environment variables (.env)
-# ---------------------------------------------
-load_dotenv()
-
-# -----------------------------
-# Calculation models
-# -----------------------------
-@dataclass(frozen=True)
-class MortgageInputs:
-    home_price: float
-    down_payment_value: float
-    down_payment_is_percent: bool
-    loan_term_years: int
-    annual_interest_rate_pct: float
-    start_month: int
-    start_year: int
-
-    include_costs: bool
-
-    # Taxes & costs (we keep all internally normalized to monthly dollars)
-    property_tax_value: float
-    property_tax_is_percent: bool  # if percent, percent of home price per year
-    home_insurance_annual: float
-    pmi_monthly: float
-    hoa_monthly: float
-    other_monthly: float
-
-
-def monthly_pi_payment(principal: float, annual_rate_pct: float, term_years: int) -> float:
-    """
-    Standard fixed-rate amortization payment:
-      M = P * [ r(1+r)^n / ((1+r)^n - 1) ]
-    where r = annual_rate/12, n = years*12.
-
-    Bankrate explicitly publishes this form and defines r as annual/12. :contentReference[oaicite:3]{index=3}
-    """
-    if principal <= 0:
-        return 0.0
-    n = term_years * 12
-    r = (annual_rate_pct / 100.0) / 12.0
-    if r == 0:
-        return principal / n
-    num = r * (1 + r) ** n
-    den = (1 + r) ** n - 1
-    return principal * (num / den)
-
-
-def amortization_totals(principal: float, annual_rate_pct: float, term_years: int, payment: float) -> tuple[float, float]:
-    """
-    Compute total interest and total paid (P+I) using a month-by-month schedule with cent rounding.
-    This avoids drift and better matches what calculators display.
-    """
-    n = term_years * 12
-    r = (annual_rate_pct / 100.0) / 12.0
-
-    bal = principal
-    total_interest = 0.0
-    total_paid = 0.0
-
-    for m in range(1, n + 1):
-        if bal <= 0:
-            break
-        interest = round(bal * r, 2)
-        principal_paid = round(payment - interest, 2)
-
-        # If we're overpaying in the final month, clamp.
-        if principal_paid > bal:
-            principal_paid = round(bal, 2)
-            payment_effective = round(principal_paid + interest, 2)
-        else:
-            payment_effective = round(payment, 2)
-
-        bal = round(bal - principal_paid, 2)
-        total_interest = round(total_interest + interest, 2)
-        total_paid = round(total_paid + payment_effective, 2)
-
-    return total_interest, total_paid
-
-
-def compute_costs_monthly(inputs: MortgageInputs, method: str) -> dict:
-    """
-    Normalize costs to monthly amounts. Key difference between methods is *input cadence*.
-
-    NerdWallet: tax & insurance are yearly; HOA & mortgage insurance are monthly. :contentReference[oaicite:4]{index=4}
-    Bankrate: includes taxes/insurance/HOA in the monthly payment view; inputs are editable. :contentReference[oaicite:5]{index=5}
-    """
-    # Property tax monthly:
-    if inputs.property_tax_is_percent:
-        # percent of home price per year
-        annual_tax = inputs.home_price * (inputs.property_tax_value / 100.0)
-        property_tax_monthly = annual_tax / 12.0
-    else:
-        # dollar amount per year for both methods (we keep UI flexible)
-        property_tax_monthly = inputs.property_tax_value / 12.0
-
-    home_insurance_monthly = inputs.home_insurance_annual / 12.0
-
-    # HOA and PMI handling:
-    # Both Bankrate and NerdWallet treat HOA and PMI as monthly pass-through costs.
-    # Differences between calculators are in input cadence and presentation, not math.
-    hoa_monthly = inputs.hoa_monthly
-    pmi_monthly = inputs.pmi_monthly
-
-    other_monthly = inputs.other_monthly
-
-    return {
-        "property_tax_monthly": property_tax_monthly,
-        "home_insurance_monthly": home_insurance_monthly,
-        "hoa_monthly": hoa_monthly,
-        "pmi_monthly": pmi_monthly,
-        "other_monthly": other_monthly,
-    }
-
-
-def payoff_date(start_year: int, start_month: int, term_years: int) -> str:
-    # payoff month is start + n-1 months (display only)
-    n = term_years * 12
-    y = start_year
-    m = start_month
-    m_total = (y * 12 + (m - 1)) + (n - 1)
-    y2 = m_total // 12
-    m2 = (m_total % 12) + 1
-    return date(y2, m2, 1).strftime("%b. %Y")
-
-
-def render_bankrate_math():
-    st.markdown("""
-### Bankrate-Style Mortgage Calculation
-
-**Monthly Principal & Interest**
-
-\\[
-M = P \times \frac{r(1+r)^n}{(1+r)^n - 1}
-\\]
-
-Where:
-- **P** = Loan principal  
-- **r** = Annual interest rate ÷ 12  
-- **n** = Loan term (years × 12)
-
-**Assumptions**
-- Fixed-rate mortgage
-- Monthly compounding
-- Cent-level rounding per payment
-- Taxes, insurance, HOA added to monthly payment
-- No ZIP-based tax estimation (user-supplied only)
-
-**Notes**
-- This matches Bankrate’s published amortization method.
-- Extra payments supported in later phase.
-""")
-
-
-def render_nerdwallet_math():
-    st.markdown("""
-### NerdWallet-Style Mortgage Calculation
-
-**Monthly Principal & Interest**
-
-\\[
-M = P \\times \\frac{r(1+r)^n}{(1+r)^n - 1}
-\\]
-
-Where:
-- **P** = Loan principal  
-- **r** = Annual interest rate ÷ 12  
-- **n** = Loan term (years × 12)
-
-**Assumptions**
-- Fixed-rate mortgage
-- Monthly compounding
-- Cent-level rounding
-- Property tax & homeowners insurance entered **annually**
-- HOA & mortgage insurance entered **monthly**
-
-**Notes**
-- Matches NerdWallet’s cost-cadence behavior
-- No automatic tax or insurance estimation
-""")
-
-
-def arm_delete(confirm_key):
-    st.session_state[confirm_key] = True
-
-
-def _get_loc_by_label(locations: list[dict], label: str) -> dict | None:
-    for loc in locations:
-        if loc["label"] == label:
-            return loc
-    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -509,17 +332,6 @@ def google_directions_driving(
     )
 
 
-def geocode_once(address: str) -> tuple[float, float]:
-    geolocator = Nominatim(
-        user_agent="house-planner-prototype",
-        timeout=5,
-    )
-    location = geolocator.geocode(address)
-    if not location:
-        raise RuntimeError(f"Could not geocode address: {address}")
-    return location.latitude, location.longitude
-
-
 def _state_abbrev_from_address_fallback(address: str) -> str | None:
     """
     Fallback: try to extract 'VA' from '..., VA 22003' style strings.
@@ -588,7 +400,6 @@ def fetch_fema_disaster_declarations(
     r = requests.get(FEMA_DISASTER_DECLARATIONS_URL, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
-
 
 
 def decode_geometry(geometry, provider):
@@ -1040,9 +851,6 @@ def parse_kml_geometries(kml_text: str):
 
     return features
 
-from bs4 import BeautifulSoup
-from lxml import etree
-import html
 
 def extract_mtbs_fire_metadata(kml_text: str):
     """
@@ -1118,46 +926,6 @@ def wildfire_recency_bucket(year: int) -> str:
 # -----------------------------
 # Session State
 # -----------------------------
-if "map_data" not in st.session_state:
-    default_locations = [
-        {
-            "label": "House",
-            "address": "4005 Ancient Oak Ct, Annandale, VA 22003",
-        },
-        # {
-        #     "label": "House",
-        #     "address": "6246 Skyway, Paradise, CA 95969",
-        # },
-        {
-            "label": "Work",
-            "address": "7500 GEOINT Dr, Springfield, VA 22150",
-        },
-        {
-            "label": "Daycare",
-            "address": "6935 Columbia Pike, Annandale, VA 22003",
-        },
-    ]
-
-    locations = []
-    for i, loc in enumerate(default_locations):
-        lat, lon = geocode_once(loc["address"])
-        locations.append({
-            "label": loc["label"],
-            "address": loc["address"],
-            "lat": lat,
-            "lon": lon,
-        })
-
-        # Be polite to Nominatim (1 request / second)
-        if i < len(default_locations) - 1:
-            time.sleep(1)
-
-    st.session_state["map_data"] = {
-        "locations": locations
-    }
-
-    st.session_state["map_badge"] = f"{len(locations)} locations"
-
 if "map_badge" not in st.session_state:
     st.session_state["map_badge"] = "3 locations"
 
@@ -1221,514 +989,34 @@ st.set_page_config(page_title="House Planner (Prototype)", layout="wide")
 
 st.title("House Planner (Prototype)")
 
-method = st.selectbox(
-    "Calculation method",
-    ["Bankrate-style", "NerdWallet-style"],
-    help="Affects input conventions and displayed assumptions."
-)
-
-if "mortgage_badge" not in st.session_state:
-    st.session_state["mortgage_badge"] = "Monthly: —"
-
 # -----------------------------
 # Safe defaults for section badges
 # -----------------------------
-monthly_badge = "Monthly: —"
 map_badge = "0 locations"
 commute_badge = "—"
 
 # =============================
 # Mortgage Section
 # =============================
-with st.expander(
-    f"Mortgage & Loan Assumptions  •  {st.session_state['mortgage_badge']}",
-    expanded=st.session_state["mortgage_expanded"],
-):
+from mortgage.ui import render_mortgage
 
-    with st.expander("Show the math & assumptions", expanded=False):
-        if method == "Bankrate-style":
-            render_bankrate_math()
-        elif method == "NerdWallet-style":
-            render_nerdwallet_math()
+if "mortgage_badge" not in st.session_state:
+    st.session_state["mortgage_badge"] = "Monthly: —"
 
-    # Layout: left input panel, right output panel
-    left, right = st.columns([1.05, 1.25], gap="large")
+method = st.selectbox(
+    "Calculation method",
+    ["Bankrate-style", "NerdWallet-style"],
+    help="Affects input conventions and displayed assumptions."
+)
 
-    with left:
-        with st.form("mortgage_form"):
-            st.subheader("Modify the values and click Calculate")
-
-            home_price = st.number_input(
-                "Home Price ($)",
-                min_value=0.0,
-                value=400000.0,
-                step=1000.0,
-                format="%.2f"
-            )
-
-            dp_cols = st.columns([0.75, 0.25], gap="small")
-            with dp_cols[0]:
-                down_payment_value = st.number_input(
-                    "Down Payment",
-                    min_value=0.0,
-                    value=20.0,
-                    step=1.0,
-                    label_visibility="collapsed"
-                )
-            with dp_cols[1]:
-                down_payment_is_percent = st.selectbox(
-                    "Unit",
-                    ["%", "$"],
-                    index=0,
-                    label_visibility="collapsed"
-                )
-
-            dp_is_percent = (down_payment_is_percent == "%")
-
-            loan_term_years = st.number_input(
-                "Loan Term (years)",
-                min_value=1,
-                value=30,
-                step=1
-            )
-
-            annual_rate = st.number_input(
-                "Interest Rate (%)",
-                min_value=0.0,
-                value=6.17,
-                step=0.01,
-                format="%.2f"
-            )
-
-            sd_cols = st.columns([0.6, 0.4])
-            with sd_cols[0]:
-                start_month_name = st.selectbox(
-                    "Start Date (month)",
-                    ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],
-                    index=0
-                )
-            with sd_cols[1]:
-                start_year = st.number_input(
-                    "Start Date (year)",
-                    min_value=1900,
-                    max_value=2200,
-                    value=2026,
-                    step=1
-                )
-
-            start_month = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].index(start_month_name) + 1
-
-            include_costs = st.checkbox("Include Taxes & Costs Below", value=True)
-
-            st.markdown("### Annual Tax & Cost")
-
-            tax_cols = st.columns([0.75, 0.25], gap="small")
-            with tax_cols[0]:
-                property_tax_value = st.number_input(
-                    "Property Taxes",
-                    min_value=0.0,
-                    value=1.2,
-                    step=0.1,
-                    label_visibility="collapsed"
-                )
-            with tax_cols[1]:
-                property_tax_unit = st.selectbox(
-                    "Unit",
-                    ["%", "$/year"],
-                    index=0,
-                    label_visibility="collapsed"
-                )
-
-            property_tax_is_percent = (property_tax_unit == "%")
-
-            home_insurance_annual = st.number_input(
-                "Home Insurance ($/year)",
-                min_value=0.0,
-                value=1500.0,
-                step=50.0
-            )
-
-            pmi_monthly = st.number_input(
-                "PMI / Mortgage Insurance ($/month)",
-                min_value=0.0,
-                value=0.0,
-                step=10.0
-            )
-
-            hoa_monthly = st.number_input(
-                "HOA Fee ($/month)",
-                min_value=0.0,
-                value=0.0,
-                step=10.0
-            )
-
-            other_monthly = st.number_input(
-                "Other Home Costs ($/month)",
-                min_value=0.0,
-                value=0.0,
-                step=25.0,
-                help="Home-related costs not captured above (maintenance, misc)."
-            )
-
-            # ---- Annual Tax & Cost Summary ----
-            if property_tax_is_percent:
-                property_tax_annual = home_price * (property_tax_value / 100.0)
-            else:
-                property_tax_annual = property_tax_value
-
-            monthly_home_costs = (
-                    property_tax_annual / 12.0
-                    + home_insurance_annual / 12.0
-                    + pmi_monthly
-                    + hoa_monthly
-                    + other_monthly
-            )
-
-            include_household_expenses = st.checkbox(
-                "Include Household Expenses Below",
-                value=True
-            )
-
-            # =============================
-            # Household Expenses
-            # =============================
-            st.markdown("### Household Expenses")
-
-            if include_household_expenses:
-                daycare_monthly = st.number_input(
-                    "Daycare ($/month)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=50.0
-                )
-
-                groceries_weekly = st.number_input(
-                    "Groceries ($/week)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=10.0
-                )
-
-                utilities_monthly = st.number_input(
-                    "Utilities ($/month)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=25.0
-                )
-
-                car_maintenance_annual = st.number_input(
-                    "Car Maintenance ($/year)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=100.0
-                )
-            else:
-                daycare_monthly = 0.0
-                groceries_weekly = 0.0
-                utilities_monthly = 0.0
-                car_maintenance_annual = 0.0
-
-            # ---- Household Expenses Summary ----
-            household_monthly = (
-                    daycare_monthly
-                    + (groceries_weekly * 52.0 / 12.0)
-                    + utilities_monthly
-                    + (car_maintenance_annual / 12.0)
-            )
-
-            calculate = st.form_submit_button("Calculate", type="primary")
-
-            if calculate:
-                st.session_state["mortgage_expanded"] = True
-
-        # =============================
-        # Additional Custom Expenses
-        # =============================
-        st.markdown("### Additional Expenses")
-
-        if "custom_expenses" not in st.session_state:
-            st.session_state["custom_expenses"] = pd.DataFrame(
-                columns=["Label", "Amount", "Cadence"]
-            )
-
-        with st.form("custom_expenses_form"):
-            custom_df = st.data_editor(
-                st.session_state["custom_expenses"],
-                hide_index=True,
-                num_rows="dynamic",
-                column_config={
-                    "Label": st.column_config.TextColumn("Expense"),
-                    "Amount": st.column_config.NumberColumn(
-                        "Amount",
-                        min_value=0.0,
-                        step=10.0
-                    ),
-                    "Cadence": st.column_config.SelectboxColumn(
-                        "Cadence",
-                        options=["$/month", "$/year"]
-                    ),
-                },
-            )
-
-            save_custom = st.form_submit_button("Apply Expenses")
-
-        if save_custom:
-            st.session_state["custom_expenses"] = custom_df
-
-        if not st.session_state["custom_expenses"].empty:
-            custom_monthly = 0.0
-            for _, row in st.session_state["custom_expenses"].iterrows():
-                if row["Cadence"] == "$/month":
-                    custom_monthly += row["Amount"]
-                elif row["Cadence"] == "$/year":
-                    custom_monthly += row["Amount"] / 12.0
-
-            st.caption(
-                f"**Custom Expenses Summary:** "
-                f"${custom_monthly:,.0f} / month"
-            )
-
-    # -----------------------------
-    # RIGHT PANEL (computed outputs)
-    # -----------------------------
-    with right:
-        if calculate:
-            # ---- Loan Summary inputs ----
-            if dp_is_percent:
-                down_payment_amt = home_price * (down_payment_value / 100.0)
-            else:
-                down_payment_amt = down_payment_value
-
-            loan_amount = max(home_price - down_payment_amt, 0.0)
-
-            inputs = MortgageInputs(
-                home_price=home_price,
-                down_payment_value=down_payment_value,
-                down_payment_is_percent=dp_is_percent,
-                loan_term_years=int(loan_term_years),
-                annual_interest_rate_pct=annual_rate,
-                start_month=int(start_month),
-                start_year=int(start_year),
-                include_costs=include_costs,
-                property_tax_value=property_tax_value,
-                property_tax_is_percent=property_tax_is_percent,
-                home_insurance_annual=home_insurance_annual,
-                pmi_monthly=pmi_monthly,
-                hoa_monthly=hoa_monthly,
-                other_monthly=other_monthly,
-            )
-
-            pi = monthly_pi_payment(
-                loan_amount,
-                inputs.annual_interest_rate_pct,
-                inputs.loan_term_years
-            )
-
-            total_interest, total_pi_paid = amortization_totals(
-                loan_amount,
-                inputs.annual_interest_rate_pct,
-                inputs.loan_term_years,
-                pi
-            )
-
-            costs = compute_costs_monthly(inputs, method=method)
-
-            monthly_tax = costs["property_tax_monthly"] if include_costs else 0.0
-            monthly_ins = costs["home_insurance_monthly"] if include_costs else 0.0
-            monthly_hoa = costs["hoa_monthly"] if include_costs else 0.0
-            monthly_pmi = costs["pmi_monthly"] if include_costs else 0.0
-            monthly_other = costs["other_monthly"] if include_costs else 0.0
-
-            monthly_total = (
-                    pi
-                    + monthly_tax
-                    + monthly_ins
-                    + monthly_hoa
-                    + monthly_pmi
-                    + monthly_other
-                    + household_monthly
-            )
-
-            # Green bar ONCE (after monthly_total exists)
-            st.markdown(
-                f"""
-                <div style="padding: 14px; border-radius: 6px; background: #2e7d32;
-                            color: white; font-size: 22px; font-weight: 700;">
-                    Monthly Payment: ${monthly_total:,.2f}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            # Update badge once
-            st.session_state["mortgage_badge"] = f"Monthly: ${monthly_total:,.0f}"
-
-            # ---- Summary ----
-            st.markdown("### Summary")
-            payoff = payoff_date(
-                inputs.start_year,
-                inputs.start_month,
-                inputs.loan_term_years
-            )
-
-            custom_monthly = 0.0
-            if not st.session_state.get("custom_expenses", pd.DataFrame()).empty:
-                for _, row in st.session_state["custom_expenses"].iterrows():
-                    if row["Cadence"] == "$/month":
-                        custom_monthly += row["Amount"]
-                    elif row["Cadence"] == "$/year":
-                        custom_monthly += row["Amount"] / 12.0
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric("House Price", f"${home_price:,.2f}")
-                st.metric("Loan Amount", f"${loan_amount:,.2f}")
-                st.metric("Down Payment", f"${down_payment_amt:,.2f}")
-            with c2:
-                st.metric("Total of Mortgage Payments (P&I)", f"${total_pi_paid:,.2f}")
-                st.metric("Total Interest", f"${total_interest:,.2f}")
-                st.metric("Mortgage Payoff Date", payoff)
-            with c3:
-                st.metric(
-                    "Tax & Cost (Monthly)",
-                    f"${monthly_home_costs:,.0f}",
-                    help="Property tax, insurance, HOA, PMI, other"
-                )
-                st.metric(
-                    "Household Expenses (Monthly)",
-                    f"${household_monthly:,.0f}",
-                    help="Daycare, groceries, utilities, car"
-                )
-                st.metric(
-                    "Additional Expenses (Monthly)",
-                    f"${custom_monthly:,.0f}",
-                    help="User-defined expenses (monthly + annual normalized)"
-                )
+render_mortgage(method)
 
 # =============================
-# Map Section
+# Location Management Section
 # =============================
-with st.expander(
-    f"Location Management  •  {st.session_state['map_badge']}",
-    expanded=st.session_state["map_expanded"]
-):
-    st.subheader("Add a Location")
+from locations.ui import render_locations
 
-    geolocator = Nominatim(user_agent="house-planner-prototype")
-
-    # -----------------------------
-    # Add-location form (keeps UI stable)
-    # -----------------------------
-    with st.form("add_location_form"):
-        cols = st.columns([0.25, 0.55, 0.2])
-
-        with cols[0]:
-            location_label = st.text_input(
-                "Location Label",
-                placeholder="House, Work, Daycare",
-                label_visibility="collapsed"
-            )
-
-        with cols[1]:
-            location_address = st.text_input(
-                "Location Address",
-                placeholder="Street, City, State",
-                label_visibility="collapsed"
-            )
-
-        with cols[2]:
-            submitted = st.form_submit_button("Add")
-
-    # -----------------------------
-    # Handle submission
-    # -----------------------------
-    if submitted:
-        if not location_label or not location_address:
-            st.warning("Please enter both a label and an address.")
-        else:
-            try:
-                location = geolocator.geocode(location_address)
-                if location:
-                    st.session_state["map_data"]["locations"].append({
-                        "label": location_label,
-                        "address": location_address,
-                        "lat": location.latitude,
-                        "lon": location.longitude,
-                    })
-
-                    # Update badge and keep section open
-                    count = len(st.session_state["map_data"]["locations"])
-                    st.session_state["map_badge"] = f"{count} locations"
-
-                    # KEEP LOCATION SECTION OPEN
-                    st.session_state["map_expanded"] = True
-                else:
-                    st.error("Address not found. Try a more complete address.")
-            except Exception as e:
-                st.error(f"Geocoding error: {e}")
-
-    # -----------------------------
-    # Build and render map + table
-    # -----------------------------
-    locations = st.session_state["map_data"]["locations"]
-
-    table_col = st.columns([1])[0]
-
-    with table_col:
-        st.subheader("Locations")
-
-        if not locations:
-            st.caption("No locations added yet.")
-        else:
-            header_cols = st.columns([0.25, 0.55, 0.2])
-            with header_cols[0]:
-                st.markdown("**Label**")
-            with header_cols[1]:
-                st.markdown("**Address**")
-            with header_cols[2]:
-                st.markdown("**Delete**")
-
-            st.divider()
-
-            for idx, loc in enumerate(locations):
-                row_cols = st.columns([0.25, 0.55, 0.2])
-
-                with row_cols[0]:
-                    st.write(loc["label"])
-
-                with row_cols[1]:
-                    st.caption(loc["address"])
-
-                with row_cols[2]:
-                    confirm_key = f"confirm_delete_{idx}"
-
-                    if confirm_key not in st.session_state:
-                        st.session_state[confirm_key] = False
-
-                    if not st.session_state[confirm_key]:
-                        st.button(
-                            "Delete",
-                            key=f"delete_{idx}",
-                            type="secondary",
-                            on_click=arm_delete,
-                            args=(confirm_key,)
-                        )
-                    else:
-                        if st.button(
-                                "Confirm",
-                                key=f"confirm_{idx}",
-                                type="primary"
-                        ):
-                            st.session_state["map_data"]["locations"].pop(idx)
-                            st.session_state.pop(confirm_key, None)
-
-                            count = len(st.session_state["map_data"]["locations"])
-                            st.session_state["map_badge"] = f"{count} locations"
-
-                            # KEEP LOCATION SECTION OPEN AFTER DELETE
-                            st.session_state["map_expanded"] = True
-
-                            st.rerun()
+render_locations()
 
 # =============================
 # Commute Section
