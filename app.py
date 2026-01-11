@@ -1465,6 +1465,7 @@ with st.expander(
                     + monthly_hoa
                     + monthly_pmi
                     + monthly_other
+                    + household_monthly
             )
 
             # Green bar ONCE (after monthly_total exists)
@@ -1577,6 +1578,9 @@ with st.expander(
                     # Update badge and keep section open
                     count = len(st.session_state["map_data"]["locations"])
                     st.session_state["map_badge"] = f"{count} locations"
+
+                    # KEEP LOCATION SECTION OPEN
+                    st.session_state["map_expanded"] = True
                 else:
                     st.error("Address not found. Try a more complete address.")
             except Exception as e:
@@ -1639,6 +1643,9 @@ with st.expander(
 
                             count = len(st.session_state["map_data"]["locations"])
                             st.session_state["map_badge"] = f"{count} locations"
+
+                            # KEEP LOCATION SECTION OPEN AFTER DELETE
+                            st.session_state["map_expanded"] = True
 
                             st.rerun()
 
