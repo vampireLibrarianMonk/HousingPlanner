@@ -82,245 +82,286 @@ def render_mortgage(method: str):
         left, right = st.columns([1.05, 1.25], gap="large")
 
         with left:
-            with st.form("mortgage_form"):
-                st.subheader("Modify the values and click Calculate")
+            st.subheader("Review Each Section Below:")
 
-                home_price = st.number_input(
-                    "Home Price ($)",
+            home_price = st.number_input(
+                "Home Price ($)",
+                min_value=0.0,
+                value=400000.0,
+                step=1000.0,
+                format="%.2f"
+            )
+
+            dp_cols = st.columns([0.75, 0.25], gap="small")
+            with dp_cols[0]:
+                down_payment_value = st.number_input(
+                    "Down Payment",
                     min_value=0.0,
-                    value=400000.0,
-                    step=1000.0,
-                    format="%.2f"
+                    value=20.0,
+                    step=1.0,
+                    label_visibility="collapsed"
+                )
+            with dp_cols[1]:
+                down_payment_is_percent = st.selectbox(
+                    "Unit",
+                    ["%", "$"],
+                    index=0,
+                    label_visibility="collapsed"
                 )
 
-                dp_cols = st.columns([0.75, 0.25], gap="small")
-                with dp_cols[0]:
-                    down_payment_value = st.number_input(
-                        "Down Payment",
-                        min_value=0.0,
-                        value=20.0,
-                        step=1.0,
-                        label_visibility="collapsed"
-                    )
-                with dp_cols[1]:
-                    down_payment_is_percent = st.selectbox(
-                        "Unit",
-                        ["%", "$"],
-                        index=0,
-                        label_visibility="collapsed"
-                    )
+            dp_is_percent = (down_payment_is_percent == "%")
 
-                dp_is_percent = (down_payment_is_percent == "%")
+            loan_term_years = st.number_input(
+                "Loan Term (years)",
+                min_value=1,
+                value=30,
+                step=1
+            )
 
-                loan_term_years = st.number_input(
-                    "Loan Term (years)",
-                    min_value=1,
-                    value=30,
+            annual_rate = st.number_input(
+                "Interest Rate (%)",
+                min_value=0.0,
+                value=6.17,
+                step=0.01,
+                format="%.2f"
+            )
+
+            sd_cols = st.columns([0.6, 0.4])
+            with sd_cols[0]:
+                start_month_name = st.selectbox(
+                    "Start Date (month)",
+                    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+                    index=0
+                )
+            with sd_cols[1]:
+                start_year = st.number_input(
+                    "Start Date (year)",
+                    min_value=1900,
+                    max_value=2200,
+                    value=2026,
                     step=1
                 )
 
-                annual_rate = st.number_input(
-                    "Interest Rate (%)",
+            start_month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].index(
+                start_month_name) + 1
+
+            include_costs = st.checkbox("Include Taxes & Costs Below", value=True)
+
+            st.markdown("### Annual Tax & Cost")
+
+            tax_cols = st.columns([0.75, 0.25], gap="small")
+            with tax_cols[0]:
+                property_tax_value = st.number_input(
+                    "Property Taxes",
                     min_value=0.0,
-                    value=6.17,
-                    step=0.01,
-                    format="%.2f"
+                    value=1.2,
+                    step=0.1,
+                    label_visibility="collapsed"
+                )
+            with tax_cols[1]:
+                property_tax_unit = st.selectbox(
+                    "Unit",
+                    ["%", "$/year"],
+                    index=0,
+                    label_visibility="collapsed"
                 )
 
-                sd_cols = st.columns([0.6, 0.4])
-                with sd_cols[0]:
-                    start_month_name = st.selectbox(
-                        "Start Date (month)",
-                        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-                        index=0
-                    )
-                with sd_cols[1]:
-                    start_year = st.number_input(
-                        "Start Date (year)",
-                        min_value=1900,
-                        max_value=2200,
-                        value=2026,
-                        step=1
-                    )
+            property_tax_is_percent = (property_tax_unit == "%")
 
-                start_month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
-                               "Dec"].index(start_month_name) + 1
+            home_insurance_annual = st.number_input(
+                "Home Insurance ($/year)",
+                min_value=0.0,
+                value=1500.0,
+                step=50.0
+            )
 
-                include_costs = st.checkbox("Include Taxes & Costs Below", value=True)
+            pmi_monthly = st.number_input(
+                "PMI / Mortgage Insurance ($/month)",
+                min_value=0.0,
+                value=0.0,
+                step=10.0
+            )
 
-                st.markdown("### Annual Tax & Cost")
+            hoa_monthly = st.number_input(
+                "HOA Fee ($/month)",
+                min_value=0.0,
+                value=0.0,
+                step=10.0
+            )
 
-                tax_cols = st.columns([0.75, 0.25], gap="small")
-                with tax_cols[0]:
-                    property_tax_value = st.number_input(
-                        "Property Taxes",
-                        min_value=0.0,
-                        value=1.2,
-                        step=0.1,
-                        label_visibility="collapsed"
-                    )
-                with tax_cols[1]:
-                    property_tax_unit = st.selectbox(
-                        "Unit",
-                        ["%", "$/year"],
-                        index=0,
-                        label_visibility="collapsed"
-                    )
+            other_yearly = st.number_input(
+                "Other Home Costs ($/year)",
+                min_value=0.0,
+                value=0.0,
+                step=25.0,
+                help="Home-related costs not captured above (maintenance, misc)."
+            )
 
-                property_tax_is_percent = (property_tax_unit == "%")
+            # ---- Annual Tax & Cost Summary ----
+            if property_tax_is_percent:
+                property_tax_annual = home_price * (property_tax_value / 100.0)
+            else:
+                property_tax_annual = property_tax_value
 
-                home_insurance_annual = st.number_input(
-                    "Home Insurance ($/year)",
-                    min_value=0.0,
-                    value=1500.0,
-                    step=50.0
-                )
+            monthly_home_costs = (
+                    property_tax_annual / 12.0
+                    + home_insurance_annual / 12.0
+                    + pmi_monthly
+                    + hoa_monthly
+                    + other_yearly / 12.0
+            )
 
-                pmi_monthly = st.number_input(
-                    "PMI / Mortgage Insurance ($/month)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=10.0
-                )
+            include_household_expenses = st.checkbox(
+                "Include Household Expenses Below",
+                value=True
+            )
 
-                hoa_monthly = st.number_input(
-                    "HOA Fee ($/month)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=10.0
-                )
+            st.markdown("### Household Expenses")
 
-                other_monthly = st.number_input(
-                    "Other Home Costs ($/year)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=25.0,
-                    help="Home-related costs not captured above (maintenance, misc)."
-                )
+            daycare_weekly = st.number_input(
+                "Daycare ($/week)",
+                min_value=0.0,
+                value=0.0,
+                step=50.0
+            )
 
-                # ---- Annual Tax & Cost Summary ----
-                if property_tax_is_percent:
-                    property_tax_annual = home_price * (property_tax_value / 100.0)
-                else:
-                    property_tax_annual = property_tax_value
+            groceries_weekly = st.number_input(
+                "Groceries ($/week)",
+                min_value=0.0,
+                value=0.0,
+                step=10.0
+            )
 
-                monthly_home_costs = (
-                        property_tax_annual / 12.0
-                        + home_insurance_annual / 12.0
-                        + pmi_monthly
-                        + hoa_monthly
-                        + other_monthly / 12.0
-                )
+            vehicle_gas_weekly = st.number_input(
+                "Gasoline ($/week)",
+                min_value=0.0,
+                value=0.0,
+                step=10.0
+            )
 
-                include_household_expenses = st.checkbox(
-                    "Include Household Expenses Below",
-                    value=True
-                )
+            utilities_monthly = st.number_input(
+                "Utilities ($/month)",
+                min_value=0.0,
+                value=0.0,
+                step=25.0
+            )
 
-                # =============================
-                # Household Expenses
-                # =============================
-                st.markdown("### Household Expenses")
+            car_maintenance_annual = st.number_input(
+                "Car Maintenance ($/year)",
+                min_value=0.0,
+                value=0.0,
+                step=100.0
+            )
 
-                if include_household_expenses:
-                    daycare_monthly = st.number_input(
-                        "Daycare ($/month)",
-                        min_value=0.0,
-                        value=0.0,
-                        step=50.0
-                    )
-
-                    groceries_weekly = st.number_input(
-                        "Groceries ($/week)",
-                        min_value=0.0,
-                        value=0.0,
-                        step=10.0
-                    )
-
-                    utilities_monthly = st.number_input(
-                        "Utilities ($/month)",
-                        min_value=0.0,
-                        value=0.0,
-                        step=25.0
-                    )
-
-                    car_maintenance_annual = st.number_input(
-                        "Car Maintenance ($/year)",
-                        min_value=0.0,
-                        value=0.0,
-                        step=100.0
-                    )
-                else:
-                    daycare_monthly = 0.0
-                    groceries_weekly = 0.0
-                    utilities_monthly = 0.0
-                    car_maintenance_annual = 0.0
-
-                # ---- Household Expenses Summary ----
-                household_monthly = (
-                        daycare_monthly
-                        + (groceries_weekly * 52.0 / 12.0)
-                        + utilities_monthly
-                        + (car_maintenance_annual / 12.0)
-                )
-
-                calculate = st.form_submit_button("Calculate", type="primary")
-
-                if calculate:
-                    st.session_state["mortgage_expanded"] = True
+            household_monthly = (
+                    (daycare_weekly * 52.0 / 12.0)
+                    + (groceries_weekly * 52.0 / 12.0)
+                    + (vehicle_gas_weekly * 52.0 / 12.0)
+                    + utilities_monthly
+                    + (car_maintenance_annual / 12.0)
+            ) if include_household_expenses else 0.0
 
             # =============================
             # Additional Custom Expenses
             # =============================
             st.markdown("### Additional Expenses")
 
-            if "custom_expenses" not in st.session_state:
-                st.session_state["custom_expenses"] = pd.DataFrame(
+            # ---- Initialize backing data (NON-widget key) ----
+            if "custom_expenses_df" not in st.session_state:
+                st.session_state["custom_expenses_df"] = pd.DataFrame(
                     columns=["Label", "Amount", "Cadence"]
                 )
 
-            with st.form("custom_expenses_form"):
-                custom_df = st.data_editor(
-                    st.session_state["custom_expenses"],
-                    hide_index=True,
-                    num_rows="dynamic",
-                    column_config={
-                        "Label": st.column_config.TextColumn("Expense"),
-                        "Amount": st.column_config.NumberColumn(
-                            "Amount",
-                            min_value=0.0,
-                            step=10.0
-                        ),
-                        "Cadence": st.column_config.SelectboxColumn(
-                            "Cadence",
-                            options=["$/month", "$/year"]
-                        ),
-                    },
+            # ---- Widget owns its own key ----
+            custom_expenses_editor = st.data_editor(
+                st.session_state["custom_expenses_df"],
+                hide_index=True,
+                num_rows="dynamic",
+                column_config={
+                    "Label": st.column_config.TextColumn("Expense"),
+                    "Amount": st.column_config.NumberColumn(
+                        "Amount",
+                        min_value=0.0,
+                        step=10.0
+                    ),
+                    "Cadence": st.column_config.SelectboxColumn(
+                        "Cadence",
+                        options=["$/month", "$/year"]
+                    ),
+                },
+                key="custom_expenses_editor",
+            )
+
+            # =============================
+            # Take Home Pay
+            # =============================
+            st.markdown("### Take Home Pay")
+
+            include_take_home = st.checkbox(
+                "Include Take Home Pay Comparison",
+                value=True,
+            )
+
+            # ---- Initialize backing data ----
+            if "take_home_sources_df" not in st.session_state:
+                st.session_state["take_home_sources_df"] = pd.DataFrame(
+                    columns=["Source", "Amount", "Cadence"]
                 )
 
-                save_custom = st.form_submit_button("Apply Expenses")
+            take_home_editor = st.data_editor(
+                st.session_state["take_home_sources_df"],
+                hide_index=True,
+                num_rows="dynamic",
+                column_config={
+                    "Source": st.column_config.TextColumn("Income Source"),
+                    "Amount": st.column_config.NumberColumn(
+                        "Amount",
+                        min_value=0.0,
+                        step=100.0
+                    ),
+                    "Cadence": st.column_config.SelectboxColumn(
+                        "Cadence",
+                        options=["$/month", "$/year"]
+                    ),
+                },
+                key="take_home_editor",
+            )
 
-            if save_custom:
-                st.session_state["custom_expenses"] = custom_df
+            # =============================
+            # Final Calculate Action
+            # =============================
+            with st.form("calculate_form"):
+                calculate = st.form_submit_button("Calculate", type="primary")
 
-            if not st.session_state["custom_expenses"].empty:
-                custom_monthly = 0.0
-                for _, row in st.session_state["custom_expenses"].iterrows():
-                    if row["Cadence"] == "$/month":
-                        custom_monthly += row["Amount"]
-                    elif row["Cadence"] == "$/year":
-                        custom_monthly += row["Amount"] / 12.0
-
-                st.caption(
-                    f"**Custom Expenses Summary:** "
-                    f"${custom_monthly:,.0f} / month"
+            # ---- Commit table edits ONLY on Calculate ----
+            if calculate:
+                st.session_state["custom_expenses_df"] = pd.DataFrame(
+                    custom_expenses_editor,
+                    columns=["Label", "Amount", "Cadence"],
                 )
+
+                st.session_state["take_home_sources_df"] = pd.DataFrame(
+                    take_home_editor,
+                    columns=["Source", "Amount", "Cadence"],
+                )
+
+                # Keep Mortgage section expanded after Calculate
+                st.session_state["mortgage_expanded"] = True
 
         # -----------------------------
         # RIGHT PANEL (computed outputs)
         # -----------------------------
         with right:
             if calculate:
+                # ---- Normalize Take Home (monthly) ----
+                take_home_monthly = 0.0
+                if not st.session_state.get("take_home_sources_df", pd.DataFrame()).empty:
+                    for _, row in st.session_state["take_home_sources_df"].iterrows():
+                        if row["Cadence"] == "$/month":
+                            take_home_monthly += row["Amount"]
+                        elif row["Cadence"] == "$/year":
+                            take_home_monthly += row["Amount"] / 12.0
+
                 # ---- Loan Summary inputs ----
                 if dp_is_percent:
                     down_payment_amt = home_price * (down_payment_value / 100.0)
@@ -343,7 +384,7 @@ def render_mortgage(method: str):
                     home_insurance_annual=home_insurance_annual,
                     pmi_monthly=pmi_monthly,
                     hoa_monthly=hoa_monthly,
-                    other_monthly=other_monthly,
+                    other_yearly=other_yearly,
                 )
 
                 pi = monthly_pi_payment(
@@ -377,12 +418,33 @@ def render_mortgage(method: str):
                         + household_monthly
                 )
 
-                # Green bar ONCE (after monthly_total exists)
+                effective_take_home = take_home_monthly if include_take_home else None
+
+                is_affordable = (
+                        effective_take_home is not None
+                        and monthly_total <= effective_take_home
+                )
+
+                payment_color = "#2e7d32" if is_affordable or not include_take_home else "#c62828"
+                status_text = "Affordable" if is_affordable else "Not Affordable"
+
+                take_home_html = (
+                    f"  |  Take Home Pay: ${take_home_monthly:,.0f}  |  ({status_text})"
+                    if include_take_home
+                    else ""
+                )
+
                 st.markdown(
                     f"""
-                    <div style="padding: 14px; border-radius: 6px; background: #2e7d32;
-                                color: white; font-size: 22px; font-weight: 700;">
-                        Monthly Payment: ${monthly_total:,.2f}
+                    <div style="
+                        padding: 14px;
+                        border-radius: 6px;
+                        background: {payment_color};
+                        color: white;
+                        font-size: 22px;
+                        font-weight: 700;
+                    ">
+                        Monthly Payment: ${monthly_total:,.2f}{take_home_html}
                     </div>
                     """,
                     unsafe_allow_html=True
@@ -400,27 +462,28 @@ def render_mortgage(method: str):
                 )
 
                 custom_monthly = 0.0
-                if not st.session_state.get("custom_expenses", pd.DataFrame()).empty:
-                    for _, row in st.session_state["custom_expenses"].iterrows():
+                if not st.session_state.get("custom_expenses_df", pd.DataFrame()).empty:
+                    for _, row in st.session_state["custom_expenses_df"].iterrows():
                         if row["Cadence"] == "$/month":
                             custom_monthly += row["Amount"]
                         elif row["Cadence"] == "$/year":
                             custom_monthly += row["Amount"] / 12.0
 
-                c1, c2, c3 = st.columns(3)
+                tax_cost_monthly = monthly_tax + monthly_ins + monthly_hoa + monthly_pmi + monthly_other
+
+                c1, c2 = st.columns(2)
                 with c1:
                     st.metric("House Price", f"${home_price:,.2f}")
                     st.metric("Loan Amount", f"${loan_amount:,.2f}")
                     st.metric("Down Payment", f"${down_payment_amt:,.2f}")
-                with c2:
                     st.metric("Total of Mortgage Payments (P&I)", f"${total_pi_paid:,.2f}")
                     st.metric("Total Interest", f"${total_interest:,.2f}")
                     st.metric("Mortgage Payoff Date", payoff)
-                with c3:
+                with c2:
                     st.metric(
                         "Tax & Cost (Monthly)",
-                        f"${monthly_home_costs:,.0f}",
-                        help="Property tax, insurance, HOA, PMI, other"
+                        f"${tax_cost_monthly:,.0f}",
+                        help="Property tax, insurance, HOA, PMI, other (monthly normalized)"
                     )
                     st.metric(
                         "Household Expenses (Monthly)",

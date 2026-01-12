@@ -18,4 +18,4 @@ class MortgageInputs:
     home_insurance_annual: float
     pmi_monthly: float
     hoa_monthly: float
-    other_monthly: float
+    other_yearly: float

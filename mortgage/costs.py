@@ -24,7 +24,7 @@ def compute_costs_monthly(inputs: MortgageInputs, method: str) -> dict:
     hoa_monthly = inputs.hoa_monthly
     pmi_monthly = inputs.pmi_monthly
 
-    other_monthly = inputs.other_monthly
+    other_monthly = inputs.other_yearly / 12.0
 
     return {
         "property_tax_monthly": property_tax_monthly,
