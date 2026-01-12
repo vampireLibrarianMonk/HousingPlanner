@@ -1,5 +1,4 @@
 import os
-from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -258,25 +257,51 @@ changing the Trip Order UI or data model.
             if bounds:
                 m.fit_bounds(bounds)
 
+            # ---------------------------------------
+            # Per-leg map layers (Leaflet control)
+            # ---------------------------------------
+            LEG_COLORS = [
+                "#D32F2F",  # red
+                "#1976D2",  # blue
+                "#388E3C",  # green
+                "#F57C00",  # orange
+                "#7B1FA2",  # purple
+                "#00796B",  # teal
+                "#5D4037",  # brown
+            ]
+
+            # One FeatureGroup per (provider, leg)
             for provider, res in st.session_state["commute_results"].items():
+                show_provider = (
+                        (provider == "ORS" and show_ors)
+                        or (provider == "Google" and show_google)
+                )
+
+                if not show_provider:
+                    continue
+
                 for seg in res.get("segment_routes", []):
                     pts = seg["points"]
                     if not pts:
                         continue
 
-                    show_route = (
-                        (provider == "ORS" and show_ors)
-                        or (provider == "Google" and show_google)
+                    leg_idx = seg["leg_index"]
+                    color = LEG_COLORS[leg_idx % len(LEG_COLORS)]
+
+                    layer_name = f"{provider}: {seg['label']}"
+
+                    leg_layer = folium.FeatureGroup(
+                        name=layer_name,
+                        show=True,
                     )
 
-                    if show_route:
-                        folium.PolyLine(
-                            locations=pts,
-                            color="#5E35B1" if provider == "ORS" else "#00695C",
-                            weight=5,
-                            opacity=0.85,
-                            tooltip=f"{provider}: {seg['from']} → {seg['to']}",
-                        ).add_to(m)
+                    folium.PolyLine(
+                        locations=pts,
+                        color=color,
+                        weight=5,
+                        opacity=0.85,
+                        tooltip=layer_name,
+                    ).add_to(leg_layer)
 
                     if show_markers:
                         folium.CircleMarker(
@@ -285,7 +310,7 @@ changing the Trip Order UI or data model.
                             color="#1565C0",
                             fill=True,
                             fill_color="#1565C0",
-                        ).add_to(m)
+                        ).add_to(leg_layer)
 
                         folium.CircleMarker(
                             location=pts[-1],
@@ -293,6 +318,13 @@ changing the Trip Order UI or data model.
                             color="#C62828",
                             fill=True,
                             fill_color="#C62828",
-                        ).add_to(m)
+                        ).add_to(leg_layer)
+
+                    leg_layer.add_to(m)
+
+            # ---------------------------------------
+            # Enable layer toggles inside the map
+            # ---------------------------------------
+            folium.LayerControl(collapsed=False).add_to(m)
 
             st_folium(m, width=900, height=500)

@@ -101,8 +101,10 @@ def compute_commute(
             all_route_points.extend(pts)
 
         segment_routes.append({
+            "leg_index": i,
             "from": a["label"],
             "to": b["label"],
+            "label": f"{a['label']} → {b['label']}",
             "points": pts,
             "provider": provider,
         })
