@@ -1,0 +1,10 @@
+[Unit]
+Description=Idle Shutdown Watchdog
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/idle_shutdown.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
