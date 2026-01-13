@@ -23,8 +23,8 @@ class HousePlannerStack(Stack):
         # =========================
         # CONFIG: set these values
         # =========================
-        domain_name = "planner.yourdomain.com"   # e.g. planner.example.com
-        hosted_zone_name = "yourdomain.com"      # e.g. example.com
+        hosted_zone_name = "housing-planner.com"
+        domain_name = "app.housing-planner.com"
 
         # --- VPC (minimal, custom) ---
         vpc = ec2.Vpc(
@@ -54,6 +54,24 @@ class HousePlannerStack(Stack):
             path="service/idle-shutdown.service",
         )
 
+        ssh_cidr = self.node.try_get_context("ssh_cidr")
+        if not ssh_cidr:
+            raise ValueError("Missing required context value: ssh_cidr")
+
+        sg = ec2.SecurityGroup(
+            self,
+            "HousePlannerEC2SG",
+            vpc=vpc,
+            description="House Planner EC2 security group",
+            allow_all_outbound=True,
+        )
+
+        sg.add_ingress_rule(
+            ec2.Peer.ipv4(ssh_cidr),
+            ec2.Port.tcp(22),
+            "SSH access from operator IP",
+        )
+
         instance = ec2.Instance(
             self,
             "HousePlannerEC2",
@@ -62,6 +80,7 @@ class HousePlannerStack(Stack):
                 cpu_type=ec2.AmazonLinuxCpuType.ARM_64
             ),
             vpc=vpc,
+            security_group=sg,
         )
 
         # --- User data: install idle shutdown ---
@@ -69,51 +88,46 @@ class HousePlannerStack(Stack):
             "#!/bin/bash",
             "set -euxo pipefail",
 
-            "dnf install -y awscli",
+            # --- SSH / EC2 Instance Connect (REQUIRED for AL2023) ---
+            "dnf install -y ec2-instance-connect",
 
-            "# Fetch idle shutdown script",
+            # Enable EC2 Instance Connect in sshd
+            "echo 'AuthorizedKeysCommand /usr/bin/eic_run_authorized_keys %u %f' > /etc/ssh/sshd_config.d/60-ec2-instance-connect.conf",
+            "echo 'AuthorizedKeysCommandUser ec2-instance-connect' >> /etc/ssh/sshd_config.d/60-ec2-instance-connect.conf",
+
+            "systemctl enable sshd",
+            "systemctl restart sshd",
+
+            # --- Idle shutdown ---
             f"aws s3 cp {idle_script_asset.s3_object_url} /usr/local/bin/idle_shutdown.sh",
             "chmod +x /usr/local/bin/idle_shutdown.sh",
 
-            "# Fetch systemd service",
             f"aws s3 cp {idle_service_asset.s3_object_url} /etc/systemd/system/idle-shutdown.service",
 
-            "# Enable and start service",
             "systemctl daemon-reexec",
             "systemctl daemon-reload",
             "systemctl enable idle-shutdown.service",
             "systemctl start idle-shutdown.service",
+        )
+
+        instance.role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ec2-instance-connect:SendSSHPublicKey"],
+                resources=["*"],
+            )
         )
 
         idle_script_asset.grant_read(instance.role)
         idle_service_asset.grant_read(instance.role)
 
         # Start STOPPED
-        instance.instance.add_property_override(
-            "InstanceInitiatedShutdownBehavior", "stop"
+        instance.instance_initiated_shutdown_behavior = (
+            ec2.InstanceInitiatedShutdownBehavior.STOP
         )
 
         instance_env = {
             "INSTANCE_ID": instance.instance_id,
         }
-
-        instance.user_data.add_commands(
-            "yum install -y awscli",
-            "",
-            "# Fetch idle shutdown script",
-            f"aws s3 cp {idle_script_asset.s3_object_url} /usr/local/bin/idle_shutdown.sh",
-            "chmod +x /usr/local/bin/idle_shutdown.sh",
-            "",
-            "# Fetch systemd service",
-            f"aws s3 cp {idle_service_asset.s3_object_url} /etc/systemd/system/idle-shutdown.service",
-            "",
-            "# Enable and start service",
-            "systemctl daemon-reexec",
-            "systemctl daemon-reload",
-            "systemctl enable idle-shutdown.service",
-            "systemctl start idle-shutdown.service",
-        )
-
         # --- Lambda: Start EC2 ---
         start_lambda = _lambda.Function(
             self,
@@ -182,12 +196,11 @@ class HousePlannerStack(Stack):
             domain_name=hosted_zone_name,
         )
 
-        cert = acm.DnsValidatedCertificate(
+        cert = acm.Certificate(
             self,
             "PlannerCert",
             domain_name=domain_name,
-            hosted_zone=zone,
-            region="us-east-1",  # CloudFront requires the cert in us-east-1
+            validation=acm.CertificateValidation.from_dns(zone),
         )
 
         distribution = cf.Distribution(

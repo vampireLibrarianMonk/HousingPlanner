@@ -1,3 +1,4 @@
+import os
 import aws_cdk as cdk
 from house_planner.stack import HousePlannerStack
 
@@ -7,8 +8,8 @@ HousePlannerStack(
     app,
     "HousePlannerStack",
     env=cdk.Environment(
-        account=app.node.try_get_context("account"),
-        region=app.node.try_get_context("region"),
+        account=os.environ["CDK_DEFAULT_ACCOUNT"],
+        region=os.environ["CDK_DEFAULT_REGION"],
     ),
 )
 
