@@ -1,5 +1,5 @@
 from datetime import date
-
+import pandas as pd
 
 def monthly_pi_payment(principal: float, annual_rate_pct: float, term_years: int) -> float:
     """
@@ -18,6 +18,106 @@ def monthly_pi_payment(principal: float, annual_rate_pct: float, term_years: int
     num = r * (1 + r) ** n
     den = (1 + r) ** n - 1
     return principal * (num / den)
+
+
+def amortization_schedule(
+    principal: float,
+    annual_rate_pct: float,
+    term_years: int,
+    payment: float,
+) -> pd.DataFrame:
+    """
+    Month-by-month amortization schedule aggregated by year.
+    """
+    n = term_years * 12
+    r = (annual_rate_pct / 100.0) / 12.0
+
+    rows = []
+    bal = principal
+    year = 1
+    interest_ytd = 0.0
+    principal_ytd = 0.0
+
+    for m in range(1, n + 1):
+        if bal <= 0:
+            break
+
+        interest = round(bal * r, 2)
+        principal_paid = round(payment - interest, 2)
+
+        if principal_paid > bal:
+            principal_paid = bal
+
+        bal = round(bal - principal_paid, 2)
+
+        interest_ytd += interest
+        principal_ytd += principal_paid
+
+        if m % 12 == 0 or bal <= 0:
+            rows.append({
+                "Year": year,
+                "Interest": interest_ytd,
+                "Principal": principal_ytd,
+                "Ending Balance": bal,
+            })
+            year += 1
+            interest_ytd = 0.0
+            principal_ytd = 0.0
+
+    return pd.DataFrame(rows)
+
+
+def amortization_schedule_with_extra(
+    principal: float,
+    annual_rate_pct: float,
+    term_years: int,
+    payment: float,
+    extra_payment_annual: float,
+) -> pd.DataFrame:
+    """
+    Same as amortization_schedule, but applies an extra annual
+    principal payment at the end of each year.
+    """
+    n = term_years * 12
+    r = (annual_rate_pct / 100.0) / 12.0
+
+    rows = []
+    bal = principal
+    year = 1
+    interest_ytd = 0.0
+    principal_ytd = 0.0
+
+    for m in range(1, n + 1):
+        if bal <= 0:
+            break
+
+        interest = round(bal * r, 2)
+        principal_paid = round(payment - interest, 2)
+
+        if principal_paid > bal:
+            principal_paid = bal
+
+        bal -= principal_paid
+        interest_ytd += interest
+        principal_ytd += principal_paid
+
+        # Apply extra payment once per year
+        if m % 12 == 0:
+            bal = max(0.0, bal - extra_payment_annual)
+
+            rows.append({
+                "Year": year,
+                "Interest": interest_ytd,
+                "Principal": principal_ytd + extra_payment_annual,
+                "Ending Balance": bal,
+            })
+
+            year += 1
+            interest_ytd = 0.0
+            principal_ytd = 0.0
+
+    return pd.DataFrame(rows)
+
 
 
 def amortization_totals(principal: float, annual_rate_pct: float, term_years: int, payment: float) -> tuple[float, float]:
