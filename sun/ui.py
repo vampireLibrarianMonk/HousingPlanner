@@ -131,4 +131,49 @@ def render_sun():
 
         st.image(overlay, width="stretch")
 
-        # (legend + explanatory markdown copied verbatim)
+        st.markdown(
+            """
+        <div style="
+            display: flex;
+            gap: 24px;
+            align-items: center;
+            margin-top: 10px;
+            font-size: 14px;
+        ">
+          <div>
+            <span style="
+                display:inline-block;
+                width:14px;
+                height:14px;
+                background:#FB8C00;
+                margin-right:6px;
+            "></span>
+            <strong>Summer</strong> (Jun–Aug)
+          </div>
+        
+          <div>
+            <span style="
+                display:inline-block;
+                width:14px;
+                height:14px;
+                background:#43A047;
+                margin-right:6px;
+            "></span>
+            <strong>Spring & Fall</strong> (Mar–May, Sep–Nov)
+          </div>
+        
+          <div>
+            <span style="
+                display:inline-block;
+                width:14px;
+                height:14px;
+                background:#1E88E5;
+                margin-right:6px;
+            "></span>
+            <strong>Winter</strong> (Dec–Feb)
+          </div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+

@@ -73,9 +73,9 @@ class HousePlannerStack(Stack):
         )
 
         sg.add_ingress_rule(
-            ec2.Peer.ipv4(ssh_cidr),
-            ec2.Port.tcp(8501),
-            "Streamlit access from operator IP",
+            ec2.Peer.any_ipv4(),
+            ec2.Port.tcp(80),
+            "Allow HTTP from CloudFront",
         )
 
         instance = ec2.Instance(
@@ -143,15 +143,15 @@ class HousePlannerStack(Stack):
 
             "cat > /etc/nginx/conf.d/streamlit.conf << 'EOF'\n"
             "server {\n"
-            "    listen 80;\n"
-            "    server_name app.housing-planner.com;\n\n"
+            "    listen 80 default_server;\n"
+            "    server_name _;\n\n"
             "    location / {\n"
             "        proxy_pass http://127.0.0.1:8501;\n"
             "        proxy_http_version 1.1;\n"
             "        proxy_set_header Host $host;\n"
             "        proxy_set_header X-Real-IP $remote_addr;\n"
             "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+            "        proxy_set_header X-Forwarded-Proto https;\n"
             "        proxy_set_header Upgrade $http_upgrade;\n"
             "        proxy_set_header Connection \"upgrade\";\n"
             "        proxy_read_timeout 86400;\n"
@@ -196,10 +196,16 @@ class HousePlannerStack(Stack):
             "mkdir -p /home/ec2-user/logs &&",
             "ls -ld /home/ec2-user/logs &&"
 
-            # Launch Streamlit (USER-OWNED LOG FILE)
+            # Launch Streamlit (USER-OWNED LOG FILE, PROXY + HTTPS AWARE)
             "nohup streamlit run app.py "
+            "--server.address=127.0.0.1 "
             "--server.port=8501 "
-            "--server.address=0.0.0.0 "
+            "--server.headless=true "
+            "--server.enableCORS=false "
+            "--server.enableXsrfProtection=false "
+            "--browser.serverAddress=app.housing-planner.com "
+            "--browser.serverPort=443 "
+            "--browser.gatherUsageStats=false "
             "> /home/ec2-user/logs/streamlit.log 2>&1 &"
             "\"",
 
@@ -265,9 +271,11 @@ class HousePlannerStack(Stack):
         # --- API Gateway ---
         api = apigw.RestApi(self, "HousePlannerAPI")
 
-        api.root.add_method(
+        status = api.root.add_resource("status")
+        status.add_method(
             "GET",
             apigw.LambdaIntegration(status_lambda),
+            authorization_type=apigw.AuthorizationType.NONE,
         )
 
         start = api.root.add_resource("start")
@@ -285,22 +293,49 @@ class HousePlannerStack(Stack):
             domain_name=hosted_zone_name,
         )
 
-        cert = acm.Certificate(
+        cert = acm.DnsValidatedCertificate(
             self,
             "PlannerCert",
             domain_name=domain_name,
-            validation=acm.CertificateValidation.from_dns(zone),
+            hosted_zone=zone,
+            region="us-east-1",  # REQUIRED for CloudFront
+        )
+
+        ec2_origin = origins.HttpOrigin(
+            instance.instance_public_dns_name,
+            protocol_policy=cf.OriginProtocolPolicy.HTTP_ONLY,
+        )
+
+        api_origin = origins.RestApiOrigin(
+            api,
+            origin_path="/prod",
         )
 
         distribution = cf.Distribution(
             self,
             "PlannerDistribution",
             default_behavior=cf.BehaviorOptions(
-                origin=origins.RestApiOrigin(api),
+                origin=ec2_origin,
                 viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 allowed_methods=cf.AllowedMethods.ALLOW_ALL,
                 cache_policy=cf.CachePolicy.CACHING_DISABLED,
             ),
+            additional_behaviors={
+                "/status*": cf.BehaviorOptions(
+                    origin=api_origin,
+                    viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    allowed_methods=cf.AllowedMethods.ALLOW_ALL,
+                    cache_policy=cf.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cf.OriginRequestPolicy.ALL_VIEWER,
+                ),
+                "/start*": cf.BehaviorOptions(
+                    origin=api_origin,
+                    viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    allowed_methods=cf.AllowedMethods.ALLOW_ALL,
+                    cache_policy=cf.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cf.OriginRequestPolicy.ALL_VIEWER,
+                ),
+            },
             domain_names=[domain_name],
             certificate=cert,
         )

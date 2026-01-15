@@ -5,12 +5,41 @@ This checklist validates each functional component of the **HousePlannerStack**
 
 All checks are **AWS CLI only**, fully **programmatic**, and safe to re-run.
 
+> Prereqs: AWS CLI v2 configured, and `jq` installed locally (`sudo apt-get install -y jq` on Ubuntu).
+
+---
+
+## 0. Known URLs (what you should be able to load)
+
+These assume you set in `stack.py`:
+
+- `domain_name = "app.housing-planner.com"`
+- CloudFront is configured with:
+  - **Default** behavior → **EC2 origin** (HTTP/80 via nginx reverse proxy to Streamlit)
+  - Additional behaviors:
+    - `/status` → API Gateway (StatusPageLambda)
+    - `/start` → API Gateway (StartInstanceLambda)
+
+So the intended URLs are:
+
+- **Main Streamlit app (HTTPS via CloudFront):**  
+  `https://app.housing-planner.com/`
+
+- **Status page (HTTPS via CloudFront → API Gateway):**  
+  `https://app.housing-planner.com/status`
+
+- **Start endpoint (HTTPS via CloudFront → API Gateway):**  
+  `https://app.housing-planner.com/start`  (POST)
+
 ---
 
 ## 1. CloudFormation Stack Health
 
 ```bash
-aws cloudformation describe-stacks   --stack-name HousePlannerStack   --query "Stacks[0].StackStatus"
+aws cloudformation describe-stacks \
+--stack-name HousePlannerStack \
+--query "Stacks[0].StackStatus" \
+--output text
 ```
 
 Expected:
@@ -26,12 +55,25 @@ CREATE_COMPLETE
 ```bash
 aws ec2 describe-instances \
 --filters "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
---query "Reservations[].Instances[].State.Name"
+--query "Reservations[].Instances[].State.Name" \
+--output text
 ```
 
 Expected:
 ```
-stopped # or running depending on when you deployed the stack (within 1 hr)
+stopped
+```
+(or `running` if you've already started it)
+
+If you want **only the running one** (and keep the same tag filter behavior):
+
+```bash
+aws ec2 describe-instances \
+  --filters \
+    "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
+    "Name=instance-state-name,Values=running" \
+  --query "Reservations[].Instances[].State.Name" \
+  --output text
 ```
 
 ---
@@ -40,31 +82,15 @@ stopped # or running depending on when you deployed the stack (within 1 hr)
 
 ```bash
 FN=$(aws cloudformation list-stack-resources \
-  --stack-name HousePlannerStack \
-  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(LogicalResourceId,'StatusPageLambda')].PhysicalResourceId | [0]" \
-  --output text) && \
-aws lambda invoke --function-name "$FN" /tmp/status.json >/dev/null && \
-jq -r '.body' /tmp/status.json
+--stack-name HousePlannerStack
+--query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(LogicalResourceId,'StatusPageLambda')].PhysicalResourceId | [0]" \
+--output text) && \
+aws lambda invoke --function-name "$FN" /tmp/status.json >/dev/null && jq -r '.body' /tmp/status.json | head -n 50
 ```
 
-Expected output includes:
-```bash
-<html>
-<head>
-<title>House Planner</title>
-<meta http-equiv="refresh" content="10">
-</head>
-<body>
-<h1>House Planner</h1>
-<p>Status: <b>running</b></p>
+Expected output includes `<html>` and a status line. The link should be:
 
-<p>Application is running.</p>
-<a href="http://##.##.#.##:8501" target="_blank">Open Streamlit App</a>
-
-</body>
-</html>
-
-```
+- `https://app.housing-planner.com/`
 
 ---
 
@@ -75,15 +101,16 @@ FN=$(aws cloudformation list-stack-resources \
 --stack-name HousePlannerStack \
 --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(LogicalResourceId,'StartInstanceLambda')].PhysicalResourceId | [0]" \
 --output text) && \
-aws lambda invoke --function-name "$FN" /tmp/start.json && cat /tmp/start.json
+aws lambda invoke --function-name "$FN" /tmp/start.json >/dev/null && cat /tmp/start.json
 ```
 
 Then confirm EC2 is running:
 
 ```bash
 aws ec2 describe-instances \
---filters "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
---query "Reservations[].Instances[].State.Name"
+--filters "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" "Name=instance-state-name,Values=running" \
+--query "Reservations[].Instances[].State.Name | [0]" \
+--output text
 ```
 
 Expected:
@@ -93,79 +120,27 @@ running
 
 ---
 
-## 5. Idle Shutdown (automatic stop after inactivity)
-
-After ~1 hour of inactivity:
+## 5. CloudFront Distribution (custom domain attached)
 
 ```bash
-aws ec2 describe-instances \
---filters "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
---query "Reservations[].Instances[].State.Name"
+aws cloudfront list-distributions \
+--query "DistributionList.Items[].{Id:Id,Domain:DomainName,Aliases:Aliases.Items}" \
+--output json | jq -r '.[] | select(.Aliases!=null) | select(.Aliases[]=="app.housing-planner.com") | "\(.Id)  \(.Domain)"'
 ```
 
-Expected:
-```
-stopped
-```
+Expected: one line with the distribution ID + its `*.cloudfront.net` domain.
 
 ---
 
-## 6. API Gateway Exists
+## 6. ACM Certificate (validated, **us-east-1**)
 
-Capture the API ID and test directly:
-
-```bash
-API_ID=$(aws apigateway get-rest-apis \
-  --query "items[?name=='HousePlannerAPI'].id | [0]" \
-  --output text) && \
-URL="https://${API_ID}.execute-api.${AWS_DEFAULT_REGION:-us-east-1}.amazonaws.com/prod/"
-```
-
-```bash
-echo "API URL: $URL" && curl -fsSL "$URL"
-```
-
-Expected:
-```bash
-I URL: https://yu9zntqk41.execute-api.us-east-1.amazonaws.com/prod/
-
-<html>
-<head>
-<title>House Planner</title>
-<meta http-equiv="refresh" content="10">
-</head>
-<body>
-<h1>House Planner</h1>
-<p>Status: <b>running</b></p>
-
-        <p>Application is running.</p>
-        <a href="http://##.##.##.##:8501" target="_blank">Open Streamlit App</a>
-        
-</body>
-</html>
-```
-
----
-
-## 7. CloudFront Distribution (custom domain attached)
-
-```bash
-aws cloudfront list-distributions --query "DistributionList.Items[].Aliases.Items[]"
-```
-
-Expected to include:
-```
-app.housing-planner.com
-```
-
----
-
-## 8. ACM Certificate (validated)
+CloudFront requires the ACM cert to be in **us-east-1**.
 
 ```bash
 aws acm list-certificates \
 --region us-east-1 \
---query "CertificateSummaryList[?DomainName=='app.housing-planner.com'].Status"
+--query "CertificateSummaryList[?DomainName=='app.housing-planner.com'].Status | [0]" \
+--output text
 ```
 
 Expected:
@@ -175,107 +150,77 @@ ISSUED
 
 ---
 
-## 9. Route53 Alias Record
+## 7. Route53 record (app → CloudFront)
+
+This should be an **ALIAS** `A` record pointing to CloudFront (not an IP).
 
 ```bash
 HZ_ID=$(aws route53 list-hosted-zones-by-name \
-  --dns-name housing-planner.com \
-  --query "HostedZones[0].Id" \
-  --output text | sed 's|/hostedzone/||')
-```
+--dns-name housing-planner.com \
+--query "HostedZones[0].Id" \
+--output text | sed 's|/hostedzone/||')
 
-```bash
 aws route53 list-resource-record-sets \
-  --hosted-zone-id "$HZ_ID" \
-  --query "ResourceRecordSets[?Name=='app.housing-planner.com.' && Type=='A'].AliasTarget.DNSName" \
-  --output text
+--hosted-zone-id "$HZ_ID" \
+--query "ResourceRecordSets[?Name=='app.housing-planner.com.' && Type=='A'].AliasTarget.DNSName | [0]" \
+--output text
 ```
 
-Expected:
-```
-"A"
-```
+Expected: a `*.cloudfront.net.` DNS name (ends with a dot).
 
 ---
 
-## 10. Get your Hosted Zone ID
-
-```bash
-HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
-  --dns-name housing-planner.com \
-  --query "HostedZones[0].Id" \
-  --output text | sed 's|/hostedzone/||')
-
-echo "Hosted Zone ID: $HOSTED_ZONE_ID"
-```
-
-Example Expected Output:
-```bash
-Hosted Zone ID: Z02860032ZNCH6LLUL27W
-```
-
----
-
-## 11. Get the EC2 public IP
-
-```bash
-EC2_IP=$(aws ec2 describe-instances \
-  --filters \
-    "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
-    "Name=instance-state-name,Values=running" \
-  --query "Reservations[0].Instances[0].PublicIpAddress" \
-  --output text)
-
-echo "EC2 IP: $EC2_IP"
-```
-
-Example Expected Output:
-```bash
-EC2 IP: 34.236.254.151
-```
-
----
-
-## 12. Create the Route 53 record
-
-```bash
-aws route53 change-resource-record-sets \
-  --hosted-zone-id "$HOSTED_ZONE_ID" \
-  --change-batch "{
-    \"Changes\": [{
-      \"Action\": \"UPSERT\",
-      \"ResourceRecordSet\": {
-        \"Name\": \"app.housing-planner.com\",
-        \"Type\": \"A\",
-        \"TTL\": 60,
-        \"ResourceRecords\": [{\"Value\": \"$EC2_IP\"}]
-      }
-    }]
-  }"
-```
-
-Example Expected Output:
-```bash
-{
-    "ChangeInfo": {
-        "Id": "/change/C030778642DUENE5B2VK",
-        "Status": "PENDING",
-        "SubmittedAt": "2026-01-14T18:00:56.832000+00:00"
-    }
-}
-```
-
----
-
-## 13. Verify DNS resolution
+## 8. Verify DNS resolution
 
 ```bash
 dig app.housing-planner.com +short
 ```
 
-Expected:
+Expected: **CloudFront edge IPs** (these can change), not your EC2 public IP.
+
+---
+
+## 9. Validate CloudFront routing (end-to-end HTTPS)
+
+Status page via CloudFront (should be 200 and HTML):
+
 ```bash
-34.236.254.151
+curl -fsSL -D- https://app.housing-planner.com/status | head -n 30
+```
+
+Main app via CloudFront (should be 200 and Streamlit HTML):
+
+```bash
+curl -fsSL -D- https://app.housing-planner.com/ | head -n 30
+```
+
+Start endpoint via CloudFront (POST; should return JSON):
+
+```bash
+curl -fsSL -X POST -D- https://app.housing-planner.com/start | head -n 30
 ```
 
 ---
+
+## 10. Idle Shutdown (automatic stop after inactivity)
+
+After ~1 hour of inactivity:
+
+```bash
+aws ec2 describe-instances \
+--filters "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
+--query "Reservations[].Instances[].State.Name" \
+--output text
+```
+
+Expected:
+```
+stopped
+```
+
+If it stays `running`, check the service on-instance:
+
+```bash
+sudo systemctl status idle-shutdown.service --no-pager
+sudo tail -n 200 /var/log/idle_shutdown.log
+```

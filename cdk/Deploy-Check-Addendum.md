@@ -25,21 +25,6 @@ INSTANCE_ID=$(aws ec2 describe-instances \
 
 ---
 
-## Resolve Availability Zone & Public IP
-
-```bash
-aws ec2 describe-instances \
---instance-ids "$INSTANCE_ID" \
---query "Reservations[0].Instances[0].[Placement.AvailabilityZone,PublicIpAddress]" \
---output text
-```
-
-Expected:
-- AZ present
-- Public IP present (instance is in a public subnet)
-
----
-
 ## Connect to the Instance (EC2 Instance Connect)
 
 ```bash
@@ -155,7 +140,9 @@ HTTP/1.1 200 OK
 3. Observe instance shutdown from another terminal:
 
 ```bash
-aws ec2 describe-instances   --instance-ids "$INSTANCE_ID"   --query "Reservations[0].Instances[0].State.Name"
+aws ec2 describe-instances \
+--instance-ids "$INSTANCE_ID" \
+--query "Reservations[0].Instances[0].State.Name"
 ```
 
 Expected:

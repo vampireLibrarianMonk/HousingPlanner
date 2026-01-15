@@ -26,16 +26,15 @@ def lambda_handler(event, context):
 
     if state == "stopped":
         body = """
-        <form method="POST" action="/start">
-            <button type="submit">Start Application</button>
-        </form>
+        <form method="POST" action="https://app.housing-planner.com/start">
         """
     elif state == "running":
-        ip = inst.get("PublicIpAddress", "pending")
-        body = f"""
-        <p>Application is running.</p>
-        <a href="http://{ip}:8501" target="_blank">Open Streamlit App</a>
-        """
+        body = """
+                <p>Application is running.</p>
+                <a href="https://app.housing-planner.com/" target="_blank">
+                    Open Streamlit App
+                </a>
+                """
     else:
         body = "<p>Starting up… please wait.</p>"
 

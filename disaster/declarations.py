@@ -51,9 +51,17 @@ def reverse_geocode_county_state(lat: float, lon: float, address_fallback: str |
     addr = raw.get("address", {}) or {}
 
     county = addr.get("county") or addr.get("state_district")
-    state_code = addr.get("state_code")  # often present in Nominatim
+    state_code = addr.get("state_code")
+
+    if state_code:
+        state_code = state_code.upper()
+
     if not state_code:
         state_code = _state_abbrev_from_address_fallback(address_fallback or "")
+
+    # Normalize county name if present
+    if county:
+        county = county.strip()
 
     return county, state_code
 
