@@ -12,18 +12,20 @@ No CDK, Python, or build checks are required.
 
 ---
 
-## 1️⃣ Resolve the EC2 Instance ID (programmatic)
+## Resolve the EC2 Instance ID (programmatic)
 
 ```bash
 INSTANCE_ID=$(aws ec2 describe-instances \
---filters "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
---query "Reservations[].Instances[].InstanceId | [0]" \
---output text) && echo "Instance ID: $INSTANCE_ID"
+  --filters \
+    "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
+    "Name=instance-state-name,Values=running" \
+  --query "Reservations[].Instances[].InstanceId | [0]" \
+  --output text) && echo "Instance ID: $INSTANCE_ID"
 ```
 
 ---
 
-## 2️⃣ Resolve Availability Zone & Public IP
+## Resolve Availability Zone & Public IP
 
 ```bash
 aws ec2 describe-instances \
@@ -38,32 +40,10 @@ Expected:
 
 ---
 
-## 3️⃣ Connect to the Instance (EC2 Instance Connect)
-
-> Assumes you have already created a compatible key (EC2 Instance Connect does NOT support ed25519 keys reliably on AL2023.)
-```bash
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa
-```
-
-> Assumes Amazon Linux 2023 and EC2 Instance Connect support.
+## Connect to the Instance (EC2 Instance Connect)
 
 ```bash
-AZ=$(aws ec2 describe-instances \
---instance-ids "$INSTANCE_ID" \
---query "Reservations[0].Instances[0].Placement.AvailabilityZone" \
---output text)
-
-aws ec2-instance-connect send-ssh-public-key \
---instance-id "$INSTANCE_ID" \
---availability-zone "$AZ" \
---instance-os-user ec2-user \
---ssh-public-key file://~/.ssh/id_rsa.pub 
-```
-
-Then SSH:
-
-```bash
-ssh ec2-user@$(aws ec2 describe-instances \
+ssh -i houseplanner-key.pem ec2-user@$(aws ec2 describe-instances \
 --instance-ids "$INSTANCE_ID" \
 --query "Reservations[0].Instances[0].PublicIpAddress" \
 --output text)
@@ -71,7 +51,7 @@ ssh ec2-user@$(aws ec2 describe-instances \
 
 ---
 
-## 4️⃣ Verify idle-shutdown systemd Service
+## Verify idle-shutdown systemd Service
 
 Once logged into the instance:
 
@@ -79,14 +59,23 @@ Once logged into the instance:
 sudo systemctl status idle-shutdown.service
 ```
 
-Expected:
-- `Loaded: loaded`
-- `Active: active (running)`
-- No error lines
+Example Expected Output:
+```bash
+● idle-shutdown.service - Idle Shutdown Watchdog
+     Loaded: loaded (/etc/systemd/system/idle-shutdown.service; enabled; preset: disabled)
+     Active: active (running) since Wed 2026-01-14 17:07:55 UTC; 6min ago
+   Main PID: 1727 (bash)
+      Tasks: 2 (limit: 2117)
+     Memory: 1.2M
+        CPU: 38ms
+     CGroup: /system.slice/idle-shutdown.service
+             ├─1727 bash /usr/local/bin/idle_shutdown.sh
+             └─1983 sleep 60
+```
 
 ---
 
-## 5️⃣ Verify Service Is Enabled on Boot
+## Verify Service Is Enabled on Boot
 
 ```bash
 sudo systemctl is-enabled idle-shutdown.service
@@ -99,7 +88,7 @@ enabled
 
 ---
 
-## 6️⃣ Verify idle-shutdown Script Location & Permissions
+## Verify idle-shutdown Script Location & Permissions
 
 ```bash
 ls -l /usr/local/bin/idle_shutdown.sh
@@ -111,7 +100,7 @@ Expected:
 
 ---
 
-## 7️⃣ Inspect idle-shutdown Logs (recent activity)
+## Inspect idle-shutdown Logs (recent activity)
 
 ```bash
 sudo journalctl -u idle-shutdown.service --since "1 hour ago"
@@ -123,7 +112,7 @@ Expected:
 
 ---
 
-## 8️⃣ Confirm idle-shutdown Process Is Running
+## Confirm idle-shutdown Process Is Running
 
 ```bash
 ps aux | grep idle_shutdown | grep -v grep
@@ -134,7 +123,7 @@ Expected:
 
 ---
 
-## 9️⃣ Verify Streamlit Application Is Running
+## Verify Streamlit Application Is Running
 
 ```bash
 ss -ltnp | grep 8501
@@ -146,7 +135,7 @@ Expected:
 
 ---
 
-## 🔟 Verify Application via Local Curl
+## Verify Application via Local Curl
 
 ```bash
 curl -I http://localhost:8501
@@ -159,7 +148,7 @@ HTTP/1.1 200 OK
 
 ---
 
-## 11️⃣ Optional: Simulate Inactivity (manual test)
+## Optional: Simulate Inactivity (manual test)
 
 1. Stop all user interaction
 2. Wait for idle timeout (~1 hour)
@@ -176,7 +165,7 @@ stopped
 
 ---
 
-## ✅ Success Criteria
+## Success Criteria
 
 - EC2 Instance Connect works
 - idle-shutdown service is running and enabled

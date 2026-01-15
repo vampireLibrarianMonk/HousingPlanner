@@ -1,10 +1,15 @@
 [Unit]
-Description=Idle Shutdown Watchdog
+Description=Idle Shutdown Monitor
 After=network.target
+Wants=network.target
 
 [Service]
+Type=simple
 ExecStart=/usr/local/bin/idle_shutdown.sh
 Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/idle-shutdown.log
+StandardError=append:/var/log/idle-shutdown.log
 
 [Install]
 WantedBy=multi-user.target

@@ -496,7 +496,7 @@ def render_mortgage(method: str):
                         pi
                     )
 
-                years = amortization_df["Year"]
+                years = amortization_df.index + 1
                 interest_cumulative = amortization_df["Interest"].cumsum()
                 balance = amortization_df["Ending Balance"]
                 annual_payment = amortization_df["Interest"] + amortization_df["Principal"]

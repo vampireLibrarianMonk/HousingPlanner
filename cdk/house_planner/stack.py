@@ -72,49 +72,138 @@ class HousePlannerStack(Stack):
             "SSH access from operator IP",
         )
 
+        sg.add_ingress_rule(
+            ec2.Peer.ipv4(ssh_cidr),
+            ec2.Port.tcp(8501),
+            "Streamlit access from operator IP",
+        )
+
         instance = ec2.Instance(
             self,
             "HousePlannerEC2",
+            vpc=vpc,
             instance_type=ec2.InstanceType("t4g.small"),
             machine_image=ec2.MachineImage.latest_amazon_linux2023(
                 cpu_type=ec2.AmazonLinuxCpuType.ARM_64
             ),
-            vpc=vpc,
             security_group=sg,
+            key_name="houseplanner-key",
         )
 
-        # --- User data: install idle shutdown ---
+        # --- User data: idle shutdown + HousingPlanner bootstrap (SSH via key pair) ---
         instance.user_data.add_commands(
             "#!/bin/bash",
             "set -euxo pipefail",
 
-            # --- SSH / EC2 Instance Connect (REQUIRED for AL2023) ---
-            "dnf install -y ec2-instance-connect",
+            "echo '===== [BOOT] Cloud-init starting ====='",
 
-            # Enable EC2 Instance Connect in sshd
-            "echo 'AuthorizedKeysCommand /usr/bin/eic_run_authorized_keys %u %f' > /etc/ssh/sshd_config.d/60-ec2-instance-connect.conf",
-            "echo 'AuthorizedKeysCommandUser ec2-instance-connect' >> /etc/ssh/sshd_config.d/60-ec2-instance-connect.conf",
+            # ------------------------------------------------------------
+            # Ensure ec2-user exists and owns its home
+            # ------------------------------------------------------------
+            "id ec2-user || useradd -m ec2-user",
+            "mkdir -p /home/ec2-user",
+            "chown -R ec2-user:ec2-user /home/ec2-user",
+            "chmod 755 /home/ec2-user",
 
+            # ------------------------------------------------------------
+            # SSH sanity (key-based SSH only)
+            # ------------------------------------------------------------
+            "echo '[CHECK] Ensuring sshd is running'",
             "systemctl enable sshd",
             "systemctl restart sshd",
+            "systemctl is-active sshd || (echo '[FATAL] sshd not running' && exit 1)",
 
-            # --- Idle shutdown ---
+            # ------------------------------------------------------------
+            # Idle shutdown (root-owned system service)
+            # ------------------------------------------------------------
+            "echo '[CHECK] Installing idle shutdown script'",
             f"aws s3 cp {idle_script_asset.s3_object_url} /usr/local/bin/idle_shutdown.sh",
             "chmod +x /usr/local/bin/idle_shutdown.sh",
 
+            "echo '[CHECK] Installing idle shutdown systemd service'",
             f"aws s3 cp {idle_service_asset.s3_object_url} /etc/systemd/system/idle-shutdown.service",
 
             "systemctl daemon-reexec",
             "systemctl daemon-reload",
             "systemctl enable idle-shutdown.service",
             "systemctl start idle-shutdown.service",
-        )
+            "systemctl is-active idle-shutdown.service || (echo '[FATAL] idle-shutdown not running' && exit 1)",
 
-        instance.role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["ec2-instance-connect:SendSSHPublicKey"],
-                resources=["*"],
-            )
+            # ------------------------------------------------------------
+            # Nginx reverse proxy (port 80 → Streamlit :8501)
+            # ------------------------------------------------------------
+            "echo '[CHECK] Installing nginx'",
+            "dnf install -y nginx",
+
+            "systemctl enable nginx",
+            "systemctl start nginx",
+            "systemctl is-active nginx || (echo '[FATAL] nginx not running' && exit 1)",
+
+            "echo '[CHECK] Writing nginx Streamlit reverse proxy config'",
+
+            "cat > /etc/nginx/conf.d/streamlit.conf << 'EOF'\n"
+            "server {\n"
+            "    listen 80;\n"
+            "    server_name app.housing-planner.com;\n\n"
+            "    location / {\n"
+            "        proxy_pass http://127.0.0.1:8501;\n"
+            "        proxy_http_version 1.1;\n"
+            "        proxy_set_header Host $host;\n"
+            "        proxy_set_header X-Real-IP $remote_addr;\n"
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+            "        proxy_set_header Upgrade $http_upgrade;\n"
+            "        proxy_set_header Connection \"upgrade\";\n"
+            "        proxy_read_timeout 86400;\n"
+            "    }\n"
+            "}\n"
+            "EOF",
+
+            "nginx -t || (echo '[FATAL] nginx config invalid' && exit 1)",
+            "systemctl reload nginx",
+
+            # ============================================================
+            # HousingPlanner bootstrap — ALL as ec2-user
+            # ============================================================
+
+            "echo '[CHECK] Installing system packages'",
+            "dnf install -y git python3.12 python3.12-devel",
+
+            # --- Prepare ec2-user directories ---
+            "mkdir -p /home/ec2-user/logs",
+            "chown -R ec2-user:ec2-user /home/ec2-user/logs",
+            "chmod 755 /home/ec2-user/logs",
+
+            # ------------------------------------------------------------
+            # Run application setup as ec2-user
+            # ------------------------------------------------------------
+            "su - ec2-user -c \""
+            "cd ~ && "
+            "git clone https://github.com/vampireLibrarianMonk/HousingPlanner.git || true && "
+            "cd HousingPlanner && "
+            "git fetch && "
+            "git checkout base-prototype-sun-disaster && "
+
+            # Python venv
+            "python3.12 -m venv .venv && "
+            "source .venv/bin/activate && "
+
+            # Dependencies
+            "pip install --upgrade pip && "
+            "pip install -r requirements.txt && "
+            
+            # Ensure log directory exists
+            "mkdir -p /home/ec2-user/logs &&",
+            "ls -ld /home/ec2-user/logs &&"
+
+            # Launch Streamlit (USER-OWNED LOG FILE)
+            "nohup streamlit run app.py "
+            "--server.port=8501 "
+            "--server.address=0.0.0.0 "
+            "> /home/ec2-user/logs/streamlit.log 2>&1 &"
+            "\"",
+
+            "echo '===== [SUCCESS] Instance fully initialized ====='",
         )
 
         idle_script_asset.grant_read(instance.role)

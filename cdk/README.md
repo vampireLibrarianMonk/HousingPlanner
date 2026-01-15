@@ -49,41 +49,51 @@ These values **must match** the hosted zone you created.
 
 ## Deploy Order
 
-# 0. Get and store your ip address
+# 1. Get and store your ip address
 ```bash
 export MY_PUBLIC_IP=$(curl -s https://checkip.amazonaws.com)/32
 echo $MY_PUBLIC_IP
 ```
 
-# 0. Create and insert the qualifier
+# 2. Create and insert the qualifier
 ```bash
 QUALIFIER=$(git remote get-url origin | tr -d '\n' | sha256sum | cut -c1-10); \
 jq --arg q "$QUALIFIER" '.context["@aws-cdk/core:bootstrapQualifier"]=$q' cdk.json > cdk.json.tmp && mv cdk.json.tmp cdk.json
 ```
 
-# 1. Activate the virtual environment and install the python libraries
+# 3. Create a key pair for administering the ec2 instance
+```bash
+aws ec2 create-key-pair \
+  --key-name houseplanner-key \
+  --query 'KeyMaterial' \
+  --output text > houseplanner-key.pem
+
+chmod 400 houseplanner-key.pem
+```
+
+# 4. Activate the virtual environment and install the python libraries
 ```bash
 source .venv/bin/activate
 pip install -r requirements
 ```
 
-# 2. Clean old context (important)
+# 5. Clean old context (important)
 ```bash
 cdk context --clear
 rm -rf cdk.out
 ```
 
-# 3. Bootstrap (now works)
+# 6. Bootstrap (now works)
 ```bash
 cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/us-east-1
 ```
 
-# 4. Synth
+# 7. Synth
 ```bash
 cdk synth
 ```
 
-# 5. Deploy
+# 8. Deploy
 ```bash
 cdk deploy -c ssh_cidr=$MY_PUBLIC_IP
 ```

@@ -198,24 +198,84 @@ Expected:
 
 ---
 
-## 10. End-to-End User Check
+## 10. Get your Hosted Zone ID
 
 ```bash
-curl https://app.housing-planner.com
+HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
+  --dns-name housing-planner.com \
+  --query "HostedZones[0].Id" \
+  --output text | sed 's|/hostedzone/||')
+
+echo "Hosted Zone ID: $HOSTED_ZONE_ID"
 ```
 
-Expected:
-- Status page loads
-- EC2 auto-starts if stopped
-- Application transitions to ready
+Example Expected Output:
+```bash
+Hosted Zone ID: Z02860032ZNCH6LLUL27W
+```
 
 ---
 
-## Success Criteria
+## 11. Get the EC2 public IP
 
-- No always-on compute
-- EC2 starts only on demand
-- EC2 stops automatically after inactivity
-- Custom domain resolves via CloudFront
-- ACM certificate is valid
-- All checks pass without manual resource IDs
+```bash
+EC2_IP=$(aws ec2 describe-instances \
+  --filters \
+    "Name=tag:Name,Values=HousePlannerStack/HousePlannerEC2" \
+    "Name=instance-state-name,Values=running" \
+  --query "Reservations[0].Instances[0].PublicIpAddress" \
+  --output text)
+
+echo "EC2 IP: $EC2_IP"
+```
+
+Example Expected Output:
+```bash
+EC2 IP: 34.236.254.151
+```
+
+---
+
+## 12. Create the Route 53 record
+
+```bash
+aws route53 change-resource-record-sets \
+  --hosted-zone-id "$HOSTED_ZONE_ID" \
+  --change-batch "{
+    \"Changes\": [{
+      \"Action\": \"UPSERT\",
+      \"ResourceRecordSet\": {
+        \"Name\": \"app.housing-planner.com\",
+        \"Type\": \"A\",
+        \"TTL\": 60,
+        \"ResourceRecords\": [{\"Value\": \"$EC2_IP\"}]
+      }
+    }]
+  }"
+```
+
+Example Expected Output:
+```bash
+{
+    "ChangeInfo": {
+        "Id": "/change/C030778642DUENE5B2VK",
+        "Status": "PENDING",
+        "SubmittedAt": "2026-01-14T18:00:56.832000+00:00"
+    }
+}
+```
+
+---
+
+## 13. Verify DNS resolution
+
+```bash
+dig app.housing-planner.com +short
+```
+
+Expected:
+```bash
+34.236.254.151
+```
+
+---
