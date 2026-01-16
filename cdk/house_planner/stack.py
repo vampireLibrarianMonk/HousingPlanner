@@ -12,8 +12,6 @@ from aws_cdk import (
     aws_route53 as r53,
     aws_route53_targets as r53_targets,
     aws_s3_assets as s3_assets,
-    aws_secretsmanager as secretsmanager,
-    SecretValue
 )
 from constructs import Construct
 
@@ -60,12 +58,6 @@ class HousePlannerStack(Stack):
         if not ssh_cidr:
             raise ValueError("Missing required context value: ssh_cidr")
 
-        ors_api_key = self.node.try_get_context("ors_api_key")
-        google_api_key = self.node.try_get_context("google_maps_api_key")
-
-        if not ors_api_key or not google_api_key:
-            raise ValueError("Missing required context values: ors_api_key / google_maps_api_key")
-
         sg = ec2.SecurityGroup(
             self,
             "HousePlannerEC2SG",
@@ -80,10 +72,14 @@ class HousePlannerStack(Stack):
             "SSH access from operator IP",
         )
 
-        cloudfront_origin_pl = ec2.PrefixList.from_prefix_list_name(
+        cloudfront_pl_id = self.node.try_get_context("cloudfront_pl_id")
+        if not cloudfront_pl_id:
+            raise ValueError("Missing required context value: cloudfront_pl_id")
+
+        cloudfront_origin_pl = ec2.PrefixList.from_prefix_list_id(
             self,
             "CloudFrontOriginPrefixList",
-            "com.amazonaws.global.cloudfront.origin-facing",
+            cloudfront_pl_id,
         )
 
         sg.add_ingress_rule(
@@ -107,23 +103,6 @@ class HousePlannerStack(Stack):
                 "houseplanner-key",
             ),
         )
-
-        ors_secret = secretsmanager.Secret(
-            self,
-            "ORSApiKeySecret",
-            secret_name="houseplanner/ors_api_key",
-            secret_string_value=SecretValue.unsafe_plain_text(ors_api_key),
-        )
-
-        google_secret = secretsmanager.Secret(
-            self,
-            "GoogleMapsApiKeySecret",
-            secret_name="houseplanner/google_maps_api_key",
-            secret_string_value=SecretValue.unsafe_plain_text(google_api_key),
-        )
-
-        ors_secret.grant_read(instance.role)
-        google_secret.grant_read(instance.role)
 
         # --- User data: idle shutdown + HousingPlanner bootstrap (SSH via key pair) ---
         instance.user_data.add_commands(
@@ -265,8 +244,8 @@ class HousePlannerStack(Stack):
             iam.PolicyStatement(
                 actions=["secretsmanager:GetSecretValue"],
                 resources=[
-                    ors_secret.secret_arn,
-                    google_secret.secret_arn,
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:houseplanner/ors_api_key*",
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:houseplanner/google_maps_api_key*",
                 ],
             )
         )
@@ -417,11 +396,3 @@ class HousePlannerStack(Stack):
             "StreamlitUiUrl",
             value=f"https://{domain_name}",
         )
-
-        # -------------------------------
-        # Secrets
-        # -------------------------------
-        CfnOutput(self, "ORSSecretArn", value=ors_secret.secret_arn)
-        CfnOutput(self, "GoogleSecretArn", value=google_secret.secret_arn)
-
-

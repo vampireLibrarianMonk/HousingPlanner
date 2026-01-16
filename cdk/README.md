@@ -49,19 +49,45 @@ These values **must match** the hosted zone you created.
 
 ## Deploy Order
 
-# 1. Get and store your ip address
+# 1. Deploy Open Route Service (ORS) and Google Maps API keys to Secrets Manager
+```bash
+aws secretsmanager create-secret \
+  --name houseplanner/ors_api_key \
+  --description "OpenRouteService API key for HousePlanner" \
+  --secret-string "5b3ce3597851110001cf6248xxxxxxxxxxxxxxxx"
+```
+
+```bash
+aws secretsmanager create-secret \
+  --name houseplanner/google_maps_api_key \
+  --description "Google Maps Routes API key for HousePlanner" \
+  --secret-string "AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+# 2. Get and store your ip address
 ```bash
 export MY_PUBLIC_IP=$(curl -s https://checkip.amazonaws.com)/32
 echo $MY_PUBLIC_IP
 ```
 
-# 2. Create and insert the qualifier
+# 3. Get and store the cloudfront prefix list
+```bash
+export CLOUDFRONT_PL_ID=$(
+  aws ec2 describe-managed-prefix-lists \
+    --query "PrefixLists[?PrefixListName=='com.amazonaws.global.cloudfront.origin-facing'].PrefixListId" \
+    --output text
+)
+echo "$CLOUDFRONT_PL_ID"
+```
+
+
+# 4. Create and insert the qualifier
 ```bash
 QUALIFIER=$(git remote get-url origin | tr -d '\n' | sha256sum | cut -c1-10); \
 jq --arg q "$QUALIFIER" '.context["@aws-cdk/core:bootstrapQualifier"]=$q' cdk.json > cdk.json.tmp && mv cdk.json.tmp cdk.json
 ```
 
-# 3. Create a key pair for administering the ec2 instance
+# 5. Create a key pair for administering the ec2 instance
 ```bash
 aws ec2 create-key-pair \
   --key-name houseplanner-key \
@@ -71,34 +97,33 @@ aws ec2 create-key-pair \
 chmod 400 houseplanner-key.pem
 ```
 
-# 4. Activate the virtual environment and install the python libraries
+# 6. Activate the virtual environment and install the python libraries
 ```bash
 source .venv/bin/activate
 pip install -r requirements
 ```
 
-# 5. Clean old context (important)
+# 7. Clean old context (important)
 ```bash
 cdk context --clear
 rm -rf cdk.out
 ```
 
-# 6. Bootstrap (now works)
+# 8. Bootstrap (now works)
 ```bash
 cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/us-east-1
 ```
 
-# 7. Synth
+# 9. Synth
 ```bash
 cdk synth
 ```
 
-# 8. Deploy
+# 10. Deploy
 ```bash
 cdk deploy \
-  -c ssh_cidr=$MY_PUBLIC_IP \
-  -c ors_api_key=sk_xxx \
-  -c google_maps_api_key=AIza_xxx
+  -c ssh_cidr="$MY_PUBLIC_IP" \
+  -c cloudfront_pl_id="$CLOUDFRONT_PL_ID"
 ```
 
 CDK will automatically:
