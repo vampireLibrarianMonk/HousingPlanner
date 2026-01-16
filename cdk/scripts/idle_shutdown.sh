@@ -1,86 +1,63 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# -------------------------------
+# =====================================================
 # Configuration
-# -------------------------------
-LOG_FILE="/var/log/idle-shutdown.log"
-PIDFILE="/run/idle-shutdown.pid"
+# =====================================================
+IDLE_LIMIT=3600        # seconds until shutdown
+CHECK_INTERVAL=60      # seconds between checks
+NGINX_ACCESS_LOG="/var/log/nginx/access.log"
 
-IDLE_LIMIT_SECONDS=$((60 * 60))   # 1 hour
-CHECK_INTERVAL=300                # 5 minutes
-NETWORK_ACTIVITY_THRESHOLD=1024   # bytes
+# =====================================================
+# State
+# =====================================================
+idle_start_ts=""
 
-# -------------------------------
-# Logging
-# -------------------------------
 log() {
-  echo "$(date -Is) | $1" >> "$LOG_FILE"
+    echo "$(date -u +"%Y-%m-%dT%H:%M:%S+00:00") | $*"
 }
 
-# -------------------------------
-# Singleton protection (CRITICAL)
-# -------------------------------
-if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-  log "[INFO] Another idle-shutdown instance already running. Exiting."
-  exit 0
-fi
+# =====================================================
+# Activity detection (nginx log mtime)
+# =====================================================
+is_active() {
+    [[ ! -f "$NGINX_ACCESS_LOG" ]] && return 1
 
-echo $$ > "$PIDFILE"
-trap 'rm -f "$PIDFILE"' EXIT
+    local now last_hit
+    now=$(date +%s)
+    last_hit=$(stat -c %Y "$NGINX_ACCESS_LOG")
 
-# -------------------------------
-# Helpers
-# -------------------------------
-get_network_bytes() {
-  awk '
-    /^[[:space:]]*(eth0|ens5):/ {
-      rx += $2;
-      tx += $10
-    }
-    END { print rx + tx }
-  ' /proc/net/dev
+    # Active if nginx handled any request in last 5 minutes
+    (( now - last_hit < 300 ))
 }
 
-# -------------------------------
-# Initial state
-# -------------------------------
-LAST_ACTIVITY_TS=$(date +%s)
-PREV_NET_BYTES=$(get_network_bytes)
-
-log "[START] Idle shutdown monitor started"
-log "[CONFIG] idle_limit=${IDLE_LIMIT_SECONDS}s interval=${CHECK_INTERVAL}s"
-
-# -------------------------------
+# =====================================================
 # Main loop
-# -------------------------------
+# =====================================================
+log "[START] Idle shutdown monitor started"
+log "[CONFIG] idle_limit=${IDLE_LIMIT}s interval=${CHECK_INTERVAL}s"
+
 while true; do
-  sleep "$CHECK_INTERVAL"
-
-  NOW=$(date +%s)
-  CUR_NET_BYTES=$(get_network_bytes)
-  NET_DELTA=$((CUR_NET_BYTES - PREV_NET_BYTES))
-  PREV_NET_BYTES=$CUR_NET_BYTES
-
-  SSH_SESSIONS=$(who | wc -l)
-
-  if [[ "$NET_DELTA" -gt "$NETWORK_ACTIVITY_THRESHOLD" ]]; then
-    LAST_ACTIVITY_TS=$NOW
-    log "[ACTIVITY] Network traffic detected (${NET_DELTA} bytes). Timer reset."
-
-  elif [[ "$SSH_SESSIONS" -gt 0 ]]; then
-    LAST_ACTIVITY_TS=$NOW
-    log "[ACTIVITY] SSH session active (${SSH_SESSIONS}). Timer reset."
-
-  else
-    IDLE_FOR=$((NOW - LAST_ACTIVITY_TS))
-    REMAINING=$((IDLE_LIMIT_SECONDS - IDLE_FOR))
-
-    if [[ "$REMAINING" -le 0 ]]; then
-      log "[SHUTDOWN] Idle limit reached. Powering off."
-      shutdown -h now
+    if is_active; then
+        idle_start_ts=""
+        log "[ACTIVE] Recent nginx traffic detected"
     else
-      log "[IDLE] No activity. ${REMAINING}s remaining until shutdown."
+        if [[ -z "$idle_start_ts" ]]; then
+            idle_start_ts=$(date +%s)
+            log "[IDLE] No recent traffic — idle timer started"
+        else
+            now=$(date +%s)
+            elapsed=$(( now - idle_start_ts ))
+
+            log "[IDLE] ${elapsed}s / ${IDLE_LIMIT}s elapsed"
+
+            if (( elapsed >= IDLE_LIMIT )); then
+                log "[SHUTDOWN] Idle limit reached — stopping instance"
+                sudo shutdown -h now
+                exit 0
+            fi
+        fi
     fi
-  fi
+
+    sleep "$CHECK_INTERVAL"
 done

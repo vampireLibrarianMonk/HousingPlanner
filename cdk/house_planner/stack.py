@@ -271,18 +271,13 @@ class HousePlannerStack(Stack):
         # --- API Gateway ---
         api = apigw.RestApi(self, "HousePlannerAPI")
 
-        status = api.root.add_resource("status")
-        status.add_method(
-            "GET",
-            apigw.LambdaIntegration(status_lambda),
-            authorization_type=apigw.AuthorizationType.NONE,
-        )
+        api_root = api.root.add_resource("api")
 
-        start = api.root.add_resource("start")
-        start.add_method(
-            "POST",
-            apigw.LambdaIntegration(start_lambda),
-        )
+        status = api_root.add_resource("status")
+        status.add_method("GET", apigw.LambdaIntegration(status_lambda))
+
+        start = api_root.add_resource("start")
+        start.add_method("POST", apigw.LambdaIntegration(start_lambda))
 
         # ==========================================================
         # (3) HTTPS: CloudFront + ACM (cert MUST be in us-east-1)
@@ -306,36 +301,16 @@ class HousePlannerStack(Stack):
             protocol_policy=cf.OriginProtocolPolicy.HTTP_ONLY,
         )
 
-        api_origin = origins.RestApiOrigin(
-            api,
-            origin_path="/prod",
-        )
-
         distribution = cf.Distribution(
             self,
             "PlannerDistribution",
             default_behavior=cf.BehaviorOptions(
                 origin=ec2_origin,
                 viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                allowed_methods=cf.AllowedMethods.ALLOW_ALL,
+                allowed_methods=cf.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
                 cache_policy=cf.CachePolicy.CACHING_DISABLED,
+                origin_request_policy=cf.OriginRequestPolicy.ALL_VIEWER,
             ),
-            additional_behaviors={
-                "/status*": cf.BehaviorOptions(
-                    origin=api_origin,
-                    viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                    allowed_methods=cf.AllowedMethods.ALLOW_ALL,
-                    cache_policy=cf.CachePolicy.CACHING_DISABLED,
-                    origin_request_policy=cf.OriginRequestPolicy.ALL_VIEWER,
-                ),
-                "/start*": cf.BehaviorOptions(
-                    origin=api_origin,
-                    viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                    allowed_methods=cf.AllowedMethods.ALLOW_ALL,
-                    cache_policy=cf.CachePolicy.CACHING_DISABLED,
-                    origin_request_policy=cf.OriginRequestPolicy.ALL_VIEWER,
-                ),
-            },
             domain_names=[domain_name],
             certificate=cert,
         )
@@ -353,7 +328,37 @@ class HousePlannerStack(Stack):
             ),
         )
 
-        # Helpful outputs
-        CfnOutput(self, "ApiGatewayUrl", value=api.url)
-        CfnOutput(self, "CloudFrontUrl", value=f"https://{distribution.domain_name}")
-        CfnOutput(self, "CustomDomainUrl", value=f"https://{domain_name}")
+        # -------------------------------
+        # API Gateway (direct, no CloudFront)
+        # -------------------------------
+
+        # Base invoke URL (includes stage, e.g. /prod/)
+        CfnOutput(
+            self,
+            "ApiGatewayBaseUrl",
+            value=api.url.rstrip("/"),
+        )
+
+        # Explicit API endpoints
+        CfnOutput(
+            self,
+            "ApiGatewayStatusUrl",
+            value=f"{api.url.rstrip('/')}/api/status",
+        )
+
+        CfnOutput(
+            self,
+            "ApiGatewayStartUrl",
+            value=f"{api.url.rstrip('/')}/api/start",
+        )
+
+        # -------------------------------
+        # Streamlit UI (CloudFront only)
+        # -------------------------------
+
+        CfnOutput(
+            self,
+            "StreamlitUiUrl",
+            value=f"https://{domain_name}",
+        )
+

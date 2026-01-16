@@ -2,10 +2,11 @@
 ## EC2 Instance-Level Verification (Idle Shutdown & Runtime Health)
 
 This addendum validates **instance-local behavior** that cannot be verified via Lambda or API Gateway:
-- EC2 Instance Connect access
-- idle-shutdown service status
-- timer / process health
-- Streamlit runtime status
+
+- SSH access to the EC2 instance
+- `idle-shutdown` systemd service status and logs
+- Idle timer behavior (nginx-based activity detection)
+- Streamlit runtime health
 
 All steps use **AWS CLI + standard Linux commands**.
 No CDK, Python, or build checks are required.
@@ -25,18 +26,20 @@ INSTANCE_ID=$(aws ec2 describe-instances \
 
 ---
 
-## Connect to the Instance (EC2 Instance Connect)
+## Connect to the Instance (SSH)
+
+> Note: This stack uses **key-based SSH**, not EC2 Instance Connect.
 
 ```bash
 ssh -i houseplanner-key.pem ec2-user@$(aws ec2 describe-instances \
---instance-ids "$INSTANCE_ID" \
---query "Reservations[0].Instances[0].PublicIpAddress" \
---output text)
+  --instance-ids "$INSTANCE_ID" \
+  --query "Reservations[0].Instances[0].PublicIpAddress" \
+  --output text)
 ```
 
 ---
 
-## Verify idle-shutdown systemd Service
+## Verify `idle-shutdown` systemd Service
 
 Once logged into the instance:
 
@@ -44,18 +47,17 @@ Once logged into the instance:
 sudo systemctl status idle-shutdown.service
 ```
 
-Example Expected Output:
-```bash
-● idle-shutdown.service - Idle Shutdown Watchdog
-     Loaded: loaded (/etc/systemd/system/idle-shutdown.service; enabled; preset: disabled)
-     Active: active (running) since Wed 2026-01-14 17:07:55 UTC; 6min ago
-   Main PID: 1727 (bash)
-      Tasks: 2 (limit: 2117)
-     Memory: 1.2M
-        CPU: 38ms
-     CGroup: /system.slice/idle-shutdown.service
-             ├─1727 bash /usr/local/bin/idle_shutdown.sh
-             └─1983 sleep 60
+Expected:
+- Service is **loaded**
+- Service is **active (running)**
+- Main process is `/usr/local/bin/idle_shutdown.sh`
+
+Example:
+```text
+● idle-shutdown.service - Idle Shutdown Monitor
+   Loaded: loaded (/etc/systemd/system/idle-shutdown.service; enabled)
+   Active: active (running)
+   Main PID: 1759 (bash)
 ```
 
 ---
@@ -67,13 +69,13 @@ sudo systemctl is-enabled idle-shutdown.service
 ```
 
 Expected:
-```
+```text
 enabled
 ```
 
 ---
 
-## Verify idle-shutdown Script Location & Permissions
+## Verify `idle-shutdown` Script Location & Permissions
 
 ```bash
 ls -l /usr/local/bin/idle_shutdown.sh
@@ -82,88 +84,146 @@ ls -l /usr/local/bin/idle_shutdown.sh
 Expected:
 - File exists
 - Executable bit set (`-rwxr-xr-x`)
+- Owned by `root`
 
 ---
 
-## Inspect idle-shutdown Logs (recent activity)
+## Inspect `idle-shutdown` Logs (journal)
 
+The service logs **only** to systemd’s journal.
+
+### View recent logs
 ```bash
 sudo journalctl -u idle-shutdown.service --since "1 hour ago"
 ```
 
+### Follow logs live (recommended while testing)
+```bash
+sudo journalctl -u idle-shutdown.service -f
+```
+
 Expected:
-- Periodic log entries
-- No crash / restart loops
+- `[START] Idle shutdown monitor started`
+- `[ACTIVE] Recent nginx traffic detected` **when the app is used**
+- `[IDLE] … elapsed` messages when no traffic occurs
+- A final `[SHUTDOWN] Idle limit reached` message before stop
+
+❗ If logs show continuous `[IDLE]` while the app is in use, nginx traffic is not reaching the instance.
 
 ---
 
-## Confirm idle-shutdown Process Is Running
+## Confirm Activity Detection Mechanism (nginx-based)
+
+The idle shutdown logic **does not inspect Streamlit sessions**.
+It relies on **nginx access log modification time**.
+
+Manual verification:
+
+```bash
+NOW=$(date +%s)
+LAST_HIT=$(stat -c %Y /var/log/nginx/access.log)
+echo $(( NOW - LAST_HIT ))
+```
+
+Expected:
+- Small number (seconds) when actively using the app
+- Large number when idle
+
+This is the **authoritative signal** for user activity.
+
+---
+
+## Confirm `idle-shutdown` Process Is Running
 
 ```bash
 ps aux | grep idle_shutdown | grep -v grep
 ```
 
 Expected:
-- One running process
+- Exactly one running process
 
 ---
 
 ## Verify Streamlit Application Is Running
+
+Streamlit is bound to **127.0.0.1:8501** (behind nginx).
 
 ```bash
 ss -ltnp | grep 8501
 ```
 
 Expected:
-- Listener on `0.0.0.0:8501` or `:::8501`
-- Owned by Python process
+- Listener on `127.0.0.1:8501`
+- Owned by a Python process
 
 ---
 
-## Verify Application via Local Curl
+## Verify Application Locally (bypassing nginx)
 
 ```bash
-curl -I http://localhost:8501
+curl -I http://127.0.0.1:8501
 ```
 
 Expected:
-```
+```text
 HTTP/1.1 200 OK
 ```
 
 ---
 
-## Optional: Simulate Inactivity (manual test)
-
-1. Stop all user interaction
-2. Wait for idle timeout (~1 hour)
-3. Observe instance shutdown from another terminal:
+## Optional: Verify nginx Reverse Proxy
 
 ```bash
-aws ec2 describe-instances \
---instance-ids "$INSTANCE_ID" \
---query "Reservations[0].Instances[0].State.Name"
+sudo systemctl status nginx
+```
+
+```bash
+curl -I http://localhost
 ```
 
 Expected:
+- HTTP `200` or `302`
+- Confirms nginx → Streamlit proxy path
+
+---
+
+## Optional: Simulate Inactivity (End-to-End Test)
+
+1. Close all browsers / tabs using the app
+2. Wait for the idle timeout (default: ~1 hour)
+3. From another terminal, check instance state:
+
+```bash
+aws ec2 describe-instances \
+  --instance-ids "$INSTANCE_ID" \
+  --query "Reservations[0].Instances[0].State.Name" \
+  --output text
 ```
+
+Expected:
+```text
 stopped
 ```
+
+This confirms **instance-initiated shutdown** is working correctly.
 
 ---
 
 ## Success Criteria
 
-- EC2 Instance Connect works
-- idle-shutdown service is running and enabled
-- Script is executable and logging
-- Streamlit app is reachable locally
-- Instance shuts down automatically after inactivity
+- SSH access works
+- `idle-shutdown` service is running and enabled
+- Logs show ACTIVE when traffic exists and IDLE when not
+- nginx access log updates during app usage
+- Streamlit responds on `127.0.0.1:8501`
+- Instance automatically transitions to `stopped` after inactivity
 
 ---
 
-## Notes
+## Notes / Corrections
 
-- Do **not** manually stop the idle-shutdown service except for debugging
-- If the service is inactive, redeploying the stack will reinstall and re-enable it
-- All instance-level checks assume Amazon Linux 2023 defaults
+- ❌ Do **not** rely on Streamlit session endpoints for activity detection
+- ❌ Do **not** use network byte counters for idleness
+- ✅ nginx `access.log` mtime is the **single source of truth**
+- Do **not** manually stop `idle-shutdown.service` except during debugging
+- Redeploying the stack reinstalls and re-enables the service automatically
