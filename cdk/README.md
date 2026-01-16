@@ -95,7 +95,10 @@ cdk synth
 
 # 8. Deploy
 ```bash
-cdk deploy -c ssh_cidr=$MY_PUBLIC_IP
+cdk deploy \
+  -c ssh_cidr=$MY_PUBLIC_IP \
+  -c ors_api_key=sk_xxx \
+  -c google_maps_api_key=AIza_xxx
 ```
 
 CDK will automatically:

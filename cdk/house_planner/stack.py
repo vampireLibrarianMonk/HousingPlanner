@@ -11,7 +11,9 @@ from aws_cdk import (
     aws_certificatemanager as acm,
     aws_route53 as r53,
     aws_route53_targets as r53_targets,
-    aws_s3_assets as s3_assets
+    aws_s3_assets as s3_assets,
+    aws_secretsmanager as secretsmanager,
+    SecretValue
 )
 from constructs import Construct
 
@@ -58,6 +60,12 @@ class HousePlannerStack(Stack):
         if not ssh_cidr:
             raise ValueError("Missing required context value: ssh_cidr")
 
+        ors_api_key = self.node.try_get_context("ors_api_key")
+        google_api_key = self.node.try_get_context("google_maps_api_key")
+
+        if not ors_api_key or not google_api_key:
+            raise ValueError("Missing required context values: ors_api_key / google_maps_api_key")
+
         sg = ec2.SecurityGroup(
             self,
             "HousePlannerEC2SG",
@@ -72,10 +80,16 @@ class HousePlannerStack(Stack):
             "SSH access from operator IP",
         )
 
+        cloudfront_origin_pl = ec2.PrefixList.from_prefix_list_name(
+            self,
+            "CloudFrontOriginPrefixList",
+            "com.amazonaws.global.cloudfront.origin-facing",
+        )
+
         sg.add_ingress_rule(
-            ec2.Peer.any_ipv4(),
+            ec2.Peer.prefix_list(cloudfront_origin_pl.prefix_list_id),
             ec2.Port.tcp(80),
-            "Allow HTTP from CloudFront",
+            "Allow HTTP from CloudFront origin only",
         )
 
         instance = ec2.Instance(
@@ -87,8 +101,27 @@ class HousePlannerStack(Stack):
                 cpu_type=ec2.AmazonLinuxCpuType.ARM_64
             ),
             security_group=sg,
-            key_name="houseplanner-key",
+            key_pair=ec2.KeyPair.from_key_pair_name(
+                self,
+                "HousePlannerKeyPair",
+                "houseplanner-key",
+            ),
         )
+
+        ors_secret = secretsmanager.Secret(
+            self,
+            "ORSApiKeySecret",
+            secret_string_value=SecretValue.unsafe_plain_text(ors_api_key),
+        )
+
+        google_secret = secretsmanager.Secret(
+            self,
+            "GoogleMapsApiKeySecret",
+            secret_string_value=SecretValue.unsafe_plain_text(google_api_key),
+        )
+
+        ors_secret.grant_read(instance.role)
+        google_secret.grant_read(instance.role)
 
         # --- User data: idle shutdown + HousingPlanner bootstrap (SSH via key pair) ---
         instance.user_data.add_commands(
@@ -182,7 +215,7 @@ class HousePlannerStack(Stack):
             "git clone https://github.com/vampireLibrarianMonk/HousingPlanner.git || true && "
             "cd HousingPlanner && "
             "git fetch && "
-            "git checkout base-prototype-sun-disaster && "
+            "git checkout base-prototype-aws-only-integration && "
 
             # Python venv
             "python3.12 -m venv .venv && "
@@ -193,8 +226,19 @@ class HousePlannerStack(Stack):
             "pip install -r requirements.txt && "
             
             # Ensure log directory exists
-            "mkdir -p /home/ec2-user/logs &&",
-            "ls -ld /home/ec2-user/logs &&"
+            "mkdir -p /home/ec2-user/logs && "
+            "ls -ld /home/ec2-user/logs && "
+            
+            # Environment Variables (INLINE, REAL EXPORTS)
+            "export ORS_API_KEY=$(aws secretsmanager get-secret-value "
+            "--secret-id ORSApiKeySecret "
+            "--query SecretString "
+            "--output text) && "
+            
+            "export GOOGLE_MAPS_API_KEY=$(aws secretsmanager get-secret-value "
+            "--secret-id GoogleMapsApiKeySecret "
+            "--query SecretString "
+            "--output text) && "
 
             # Launch Streamlit (USER-OWNED LOG FILE, PROXY + HTTPS AWARE)
             "nohup streamlit run app.py "
@@ -361,4 +405,11 @@ class HousePlannerStack(Stack):
             "StreamlitUiUrl",
             value=f"https://{domain_name}",
         )
+
+        # -------------------------------
+        # Secrets
+        # -------------------------------
+        CfnOutput(self, "ORSSecretArn", value=ors_secret.secret_arn)
+        CfnOutput(self, "GoogleSecretArn", value=google_secret.secret_arn)
+
 

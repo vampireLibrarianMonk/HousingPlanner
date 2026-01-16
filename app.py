@@ -4,12 +4,6 @@
 from state import init_state
 init_state()
 
-# ---------------------------------------------
-# Load environment variables (.env)
-# ---------------------------------------------
-from dotenv import load_dotenv
-load_dotenv()
-
 # =============================
 # Third-party: Core app & data
 # =============================
