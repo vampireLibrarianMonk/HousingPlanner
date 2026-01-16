@@ -111,12 +111,14 @@ class HousePlannerStack(Stack):
         ors_secret = secretsmanager.Secret(
             self,
             "ORSApiKeySecret",
+            secret_name="houseplanner/ors_api_key",
             secret_string_value=SecretValue.unsafe_plain_text(ors_api_key),
         )
 
         google_secret = secretsmanager.Secret(
             self,
             "GoogleMapsApiKeySecret",
+            secret_name="houseplanner/google_maps_api_key",
             secret_string_value=SecretValue.unsafe_plain_text(google_api_key),
         )
 
@@ -222,8 +224,8 @@ class HousePlannerStack(Stack):
             "source .venv/bin/activate && "
 
             # Dependencies
-            "pip install --upgrade pip && "
-            "pip install -r requirements.txt && "
+            "python -m pip install --upgrade pip && "   
+            "python -m pip install -r requirements.txt && "
             
             # Ensure log directory exists
             "mkdir -p /home/ec2-user/logs && "
@@ -231,12 +233,12 @@ class HousePlannerStack(Stack):
             
             # Environment Variables (INLINE, REAL EXPORTS)
             "export ORS_API_KEY=$(aws secretsmanager get-secret-value "
-            "--secret-id ORSApiKeySecret "
+            "--secret-id houseplanner/ors_api_key "
             "--query SecretString "
             "--output text) && "
             
             "export GOOGLE_MAPS_API_KEY=$(aws secretsmanager get-secret-value "
-            "--secret-id GoogleMapsApiKeySecret "
+            "--secret-id houseplanner/google_maps_api_key  "
             "--query SecretString "
             "--output text) && "
 
@@ -258,6 +260,16 @@ class HousePlannerStack(Stack):
 
         idle_script_asset.grant_read(instance.role)
         idle_service_asset.grant_read(instance.role)
+
+        instance.role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[
+                    ors_secret.secret_arn,
+                    google_secret.secret_arn,
+                ],
+            )
+        )
 
         # Start STOPPED
         instance.instance_initiated_shutdown_behavior = (
