@@ -1,4 +1,5 @@
-import os
+import boto3
+from botocore.exceptions import ClientError
 
 import pandas as pd
 import streamlit as st
@@ -7,6 +8,15 @@ from streamlit_folium import st_folium
 
 from locations.logic import _get_loc_by_label
 from .logic import compute_commute
+
+@st.cache_data(show_spinner=False)
+def _get_secret(secret_name: str) -> str:
+    client = boto3.client("secretsmanager")
+    try:
+        resp = client.get_secret_value(SecretId=secret_name)
+    except ClientError as e:
+        raise RuntimeError(f"Unable to load secret '{secret_name}': {e}")
+    return resp["SecretString"]
 
 
 def render_commute():
@@ -62,18 +72,22 @@ changing the Trip Order UI or data model.
         )
 
         # ---------------------------------------------
-        # Routing API Keys
+        # Routing API Keys (AWS Secrets Manager)
         # ---------------------------------------------
-        ors_api_key = os.getenv("ORS_API_KEY")
-        google_api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+        try:
+            ors_api_key = _get_secret("houseplanner/ors_api_key")
+            google_api_key = _get_secret("houseplanner/google_maps_api_key")
+        except Exception as e:
+            st.error(str(e))
+            return
 
         if routing_method.startswith("OpenRouteService"):
             if not ors_api_key:
-                st.error("ORS_API_KEY is not set.")
+                st.error("ORS API key could not be loaded.")
                 return
         else:
             if not google_api_key:
-                st.error("GOOGLE_MAPS_API_KEY is not set.")
+                st.error("Google Maps API key could not be loaded.")
                 return
 
         # ---------------------------------------------
