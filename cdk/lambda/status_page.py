@@ -26,15 +26,18 @@ def lambda_handler(event, context):
 
     if state == "stopped":
         body = """
-        <form method="POST" action="https://app.housing-planner.com/start">
+        <p>Application is currently <b>stopped</b>.</p>
+        <p>
+          An administrator must start the instance via the secured API.
+        </p>
         """
     elif state == "running":
         body = """
-                <p>Application is running.</p>
-                <a href="https://app.housing-planner.com/" target="_blank">
-                    Open Streamlit App
-                </a>
-                """
+        <p>Application is running.</p>
+        <a href="https://app.housing-planner.com/" target="_blank">
+            Open Streamlit App
+        </a>
+        """
     else:
         body = "<p>Starting up… please wait.</p>"
 

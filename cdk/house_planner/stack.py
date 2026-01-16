@@ -12,13 +12,19 @@ from aws_cdk import (
     aws_route53 as r53,
     aws_route53_targets as r53_targets,
     aws_s3_assets as s3_assets,
+    aws_cognito as cognito, Environment,
 )
 from constructs import Construct
 
 
 class HousePlannerStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs):
-        super().__init__(scope, id, **kwargs)
+        super().__init__(
+            scope,
+            id,
+            env=Environment(region="us-east-1"),
+            **kwargs,
+        )
 
         # =========================
         # CONFIG: set these values
@@ -86,6 +92,63 @@ class HousePlannerStack(Stack):
             ec2.Peer.prefix_list(cloudfront_origin_pl.prefix_list_id),
             ec2.Port.tcp(80),
             "Allow HTTP from CloudFront origin only",
+        )
+
+        # ==========================================================
+        # Cognito User Pool (Private, Invite-Only)
+        # ==========================================================
+
+        user_pool = cognito.UserPool(
+            self,
+            "HousePlannerUserPool",
+            self_sign_up_enabled=False,
+            sign_in_aliases=cognito.SignInAliases(email=True),
+            password_policy=cognito.PasswordPolicy(
+                min_length=12,
+                require_digits=True,
+                require_lowercase=True,
+                require_uppercase=True,
+                require_symbols=True,
+            ),
+            mfa=cognito.Mfa.OPTIONAL,
+            account_recovery=cognito.AccountRecovery.EMAIL_ONLY,
+        )
+
+        user_pool_client = cognito.UserPoolClient(
+            self,
+            "HousePlannerUserPoolClient",
+            user_pool=user_pool,
+            generate_secret=True,  # REQUIRED for OAuth code → token exchange
+            auth_flows=cognito.AuthFlow(
+                user_password=True,
+                user_srp=True,
+            ),
+            o_auth=cognito.OAuthSettings(
+                flows=cognito.OAuthFlows(
+                    authorization_code_grant=True,
+                ),
+                scopes=[cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
+                callback_urls=[f"https://{domain_name}/_auth/callback"],
+                logout_urls=[f"https://{domain_name}"],
+            ),
+        )
+
+        user_pool_domain = cognito.UserPoolDomain(
+            self,
+            "HousePlannerCognitoDomain",
+            user_pool=user_pool,
+            cognito_domain=cognito.CognitoDomainOptions(
+                domain_prefix=f"houseplanner-auth-{self.account[-6:]}"
+            ),
+        )
+
+        # --- Cognito group for admin-only actions (e.g., /api/start) ---
+        admin_group = cognito.CfnUserPoolGroup(
+            self,
+            "HousePlannerAdminGroup",
+            user_pool_id=user_pool.user_pool_id,
+            group_name="admin",
+            description="Admins allowed to start the EC2 instance",
         )
 
         instance = ec2.Instance(
@@ -265,7 +328,10 @@ class HousePlannerStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_12,
             handler="start_instance.lambda_handler",
             code=_lambda.Code.from_asset("lambda"),
-            environment=instance_env,
+            environment={
+                **instance_env,
+                "ADMIN_GROUP": "admin",
+            },
             timeout=Duration.seconds(10),
         )
 
@@ -308,14 +374,61 @@ class HousePlannerStack(Stack):
 
         api_root = api.root.add_resource("api")
 
+        # --- Cognito authorizer (protect ALL API endpoints per your choice B=No) ---
+        cognito_authorizer = apigw.CognitoUserPoolsAuthorizer(
+            self,
+            "HousePlannerApiAuthorizer",
+            cognito_user_pools=[user_pool],
+        )
+
         status = api_root.add_resource("status")
-        status.add_method("GET", apigw.LambdaIntegration(status_lambda))
+        status.add_method(
+            "GET",
+            apigw.LambdaIntegration(status_lambda),
+            authorization_type=apigw.AuthorizationType.COGNITO,
+            authorizer=cognito_authorizer,
+        )
 
         start = api_root.add_resource("start")
-        start.add_method("POST", apigw.LambdaIntegration(start_lambda))
+        start.add_method(
+            "POST",
+            apigw.LambdaIntegration(start_lambda),
+            authorization_type=apigw.AuthorizationType.COGNITO,
+            authorizer=cognito_authorizer,
+        )
 
         # ==========================================================
-        # (3) HTTPS: CloudFront + ACM (cert MUST be in us-east-1)
+        # Lambda@Edge (JWT enforcement) (cert MUST be in us-east-1)
+        # ==========================================================
+        edge_auth_lambda = _lambda.Function(
+            self,
+            "EdgeAuthLambda",
+            runtime=_lambda.Runtime.PYTHON_3_9,
+            handler="edge_auth.handler",
+            code=_lambda.Code.from_asset(
+                "lambda/edge",
+                bundling=_lambda.BundlingOptions(
+                    image=_lambda.Runtime.PYTHON_3_9.bundling_image,
+                    command=[
+                        "bash", "-c",
+                        f"""
+                        sed -i \
+                          -e "s|__COGNITO_DOMAIN__|{user_pool_domain.domain_name}.auth.{self.region}.amazoncognito.com|g" \
+                          -e "s|__COGNITO_CLIENT_ID__|{user_pool_client.user_pool_client_id}|g" \
+                          -e "s|__COGNITO_CLIENT_SECRET__|{user_pool_client.user_pool_client_secret.unsafe_unwrap()}|g" \
+                          -e "s|__REDIRECT_URI__|https://{domain_name}/_auth/callback|g" \
+                          -e "s|__COGNITO_ISSUER__|https://cognito-idp.{self.region}.amazonaws.com/{user_pool.user_pool_id}|g" \
+                          edge_auth.py && cp -r . /asset-output
+                        """
+                    ],
+                ),
+            ),
+        )
+
+        edge_auth_version = edge_auth_lambda.current_version
+
+        # ==========================================================
+        # HTTPS: CloudFront + ACM (cert MUST be in us-east-1)
         # ==========================================================
         zone = r53.HostedZone.from_lookup(
             self,
@@ -345,13 +458,19 @@ class HousePlannerStack(Stack):
                 allowed_methods=cf.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
                 cache_policy=cf.CachePolicy.CACHING_DISABLED,
                 origin_request_policy=cf.OriginRequestPolicy.ALL_VIEWER,
+                edge_lambdas=[
+                    cf.EdgeLambda(
+                        function_version=edge_auth_version,
+                        event_type=cf.LambdaEdgeEventType.VIEWER_REQUEST,
+                    )
+                ],
             ),
             domain_names=[domain_name],
             certificate=cert,
         )
 
         # ==========================================================
-        # (2) Route53: planner.<domain> -> CloudFront (DNS alias)
+        # Route53: planner.<domain> -> CloudFront (DNS alias)
         # ==========================================================
         r53.ARecord(
             self,
@@ -390,9 +509,24 @@ class HousePlannerStack(Stack):
         # -------------------------------
         # Streamlit UI (CloudFront only)
         # -------------------------------
-
         CfnOutput(
             self,
             "StreamlitUiUrl",
             value=f"https://{domain_name}",
+        )
+
+        # -------------------------------
+        # Cognito
+        # -------------------------------
+        CfnOutput(
+            self,
+            "CognitoLoginUrl",
+            value=(
+                f"https://{user_pool_domain.domain_name}.auth."
+                f"{self.region}.amazoncognito.com/login"
+                f"?client_id={user_pool_client.user_pool_client_id}"
+                f"&response_type=code"
+                f"&scope=openid+email"
+                f"&redirect_uri=https://{domain_name}/_auth/callback"
+            ),
         )
