@@ -272,7 +272,7 @@ class HousePlannerStack(Stack):
             "git clone https://github.com/vampireLibrarianMonk/HousingPlanner.git || true && "
             "cd HousingPlanner && "
             "git fetch && "
-            "git checkout base-prototype-aws-only-integration && "
+            # "git checkout base-prototype-aws-only-integration && "
 
             # Python venv
             "python3.12 -m venv .venv && "
