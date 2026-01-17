@@ -3,6 +3,8 @@ from aws_cdk import (
     Duration,
     CfnOutput,
     aws_ec2 as ec2,
+    aws_elasticloadbalancingv2 as elbv2,
+    aws_elasticloadbalancingv2_targets as elbv2_targets,
     aws_lambda as _lambda,
     aws_apigateway as apigw,
     aws_iam as iam,
@@ -12,9 +14,12 @@ from aws_cdk import (
     aws_route53 as r53,
     aws_route53_targets as r53_targets,
     aws_s3_assets as s3_assets,
-    aws_cognito as cognito, Environment,
+    aws_cognito as cognito,
+    Environment,
 )
 from constructs import Construct
+import hashlib
+import os
 
 
 class HousePlannerStack(Stack):
@@ -22,9 +27,14 @@ class HousePlannerStack(Stack):
         super().__init__(
             scope,
             id,
-            env=Environment(region="us-east-1"),
+            env=Environment(
+                account=os.environ["CDK_DEFAULT_ACCOUNT"],
+                region="us-east-1",
+            ),
             **kwargs,
         )
+
+        account_hash = hashlib.sha1(self.account.encode("utf-8")).hexdigest()[:8]
 
         # =========================
         # CONFIG: set these values
@@ -36,7 +46,7 @@ class HousePlannerStack(Stack):
         vpc = ec2.Vpc(
             self,
             "HousePlannerVPC",
-            max_azs=1,
+            max_azs=2,
             nat_gateways=0,
             subnet_configuration=[
                 ec2.SubnetConfiguration(
@@ -88,12 +98,6 @@ class HousePlannerStack(Stack):
             cloudfront_pl_id,
         )
 
-        sg.add_ingress_rule(
-            ec2.Peer.prefix_list(cloudfront_origin_pl.prefix_list_id),
-            ec2.Port.tcp(80),
-            "Allow HTTP from CloudFront origin only",
-        )
-
         # ==========================================================
         # Cognito User Pool (Private, Invite-Only)
         # ==========================================================
@@ -128,7 +132,7 @@ class HousePlannerStack(Stack):
                     authorization_code_grant=True,
                 ),
                 scopes=[cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
-                callback_urls=[f"https://{domain_name}/_auth/callback"],
+                callback_urls=[f"https://{domain_name}/oauth2/idpresponse"],
                 logout_urls=[f"https://{domain_name}"],
             ),
         )
@@ -138,7 +142,7 @@ class HousePlannerStack(Stack):
             "HousePlannerCognitoDomain",
             user_pool=user_pool,
             cognito_domain=cognito.CognitoDomainOptions(
-                domain_prefix=f"houseplanner-auth-{self.account[-6:]}"
+                domain_prefix=f"houseplanner-auth-{account_hash}"
             ),
         )
 
@@ -321,6 +325,7 @@ class HousePlannerStack(Stack):
         instance_env = {
             "INSTANCE_ID": instance.instance_id,
         }
+
         # --- Lambda: Start EC2 ---
         start_lambda = _lambda.Function(
             self,
@@ -398,36 +403,6 @@ class HousePlannerStack(Stack):
         )
 
         # ==========================================================
-        # Lambda@Edge (JWT enforcement) (cert MUST be in us-east-1)
-        # ==========================================================
-        edge_auth_lambda = _lambda.Function(
-            self,
-            "EdgeAuthLambda",
-            runtime=_lambda.Runtime.PYTHON_3_9,
-            handler="edge_auth.handler",
-            code=_lambda.Code.from_asset(
-                "lambda/edge",
-                bundling=_lambda.BundlingOptions(
-                    image=_lambda.Runtime.PYTHON_3_9.bundling_image,
-                    command=[
-                        "bash", "-c",
-                        f"""
-                        sed -i \
-                          -e "s|__COGNITO_DOMAIN__|{user_pool_domain.domain_name}.auth.{self.region}.amazoncognito.com|g" \
-                          -e "s|__COGNITO_CLIENT_ID__|{user_pool_client.user_pool_client_id}|g" \
-                          -e "s|__COGNITO_CLIENT_SECRET__|{user_pool_client.user_pool_client_secret.unsafe_unwrap()}|g" \
-                          -e "s|__REDIRECT_URI__|https://{domain_name}/_auth/callback|g" \
-                          -e "s|__COGNITO_ISSUER__|https://cognito-idp.{self.region}.amazonaws.com/{user_pool.user_pool_id}|g" \
-                          edge_auth.py && cp -r . /asset-output
-                        """
-                    ],
-                ),
-            ),
-        )
-
-        edge_auth_version = edge_auth_lambda.current_version
-
-        # ==========================================================
         # HTTPS: CloudFront + ACM (cert MUST be in us-east-1)
         # ==========================================================
         zone = r53.HostedZone.from_lookup(
@@ -436,34 +411,105 @@ class HousePlannerStack(Stack):
             domain_name=hosted_zone_name,
         )
 
-        cert = acm.DnsValidatedCertificate(
+        cert = acm.Certificate(
             self,
             "PlannerCert",
             domain_name=domain_name,
-            hosted_zone=zone,
-            region="us-east-1",  # REQUIRED for CloudFront
+            validation=acm.CertificateValidation.from_dns(zone),
         )
 
-        ec2_origin = origins.HttpOrigin(
-            instance.instance_public_dns_name,
-            protocol_policy=cf.OriginProtocolPolicy.HTTP_ONLY,
+        # ==========================================================
+        # ALB (Cognito auth happens here, not at Lambda@Edge)
+        # ==========================================================
+
+        alb_sg = ec2.SecurityGroup(
+            self,
+            "HousePlannerAlbSG",
+            vpc=vpc,
+            description="ALB security group CloudFront to ALB",
+            allow_all_outbound=True,
+        )
+
+        # Allow HTTPS to ALB only from CloudFront origin-facing prefix list
+        alb_sg.add_ingress_rule(
+            ec2.Peer.prefix_list(cloudfront_origin_pl.prefix_list_id),
+            ec2.Port.tcp(443),
+            "Allow HTTPS from CloudFront origin only",
+        )
+
+        # EC2 should accept HTTP only from the ALB now (not directly from CloudFront)
+        # (Replace the old CloudFront->EC2 ingress rule with this)
+        # Allow ALB to reach EC2 on port 80
+        sg.add_ingress_rule(
+            alb_sg,
+            ec2.Port.tcp(80),
+            "Allow HTTP from ALB only",
+        )
+
+        alb = elbv2.ApplicationLoadBalancer(
+            self,
+            "HousePlannerALB",
+            vpc=vpc,
+            internet_facing=True,
+            security_group=alb_sg,
+        )
+
+        https_listener = alb.add_listener(
+            "HttpsListener",
+            port=443,
+            certificates=[elbv2.ListenerCertificate(cert.certificate_arn)],
+        )
+
+        target_group = elbv2.ApplicationTargetGroup(
+            self,
+            "HousePlannerTargetGroup",
+            vpc=vpc,
+            port=80,
+            protocol=elbv2.ApplicationProtocol.HTTP,
+            targets=[elbv2_targets.InstanceTarget(instance, port=80)],
+            health_check=elbv2.HealthCheck(
+                path="/",
+                healthy_http_codes="200-499",
+            ),
+        )
+
+        https_listener.add_action(
+            "OidcAuthThenForward",
+            action=elbv2.ListenerAction.authenticate_oidc(
+                issuer=f"https://cognito-idp.{self.region}.amazonaws.com/{user_pool.user_pool_id}",
+                authorization_endpoint=(
+                    f"https://{user_pool_domain.domain_name}.auth."
+                    f"{self.region}.amazoncognito.com/oauth2/authorize"
+                ),
+                token_endpoint=(
+                    f"https://{user_pool_domain.domain_name}.auth."
+                    f"{self.region}.amazoncognito.com/oauth2/token"
+                ),
+                user_info_endpoint=(
+                    f"https://{user_pool_domain.domain_name}.auth."
+                    f"{self.region}.amazoncognito.com/oauth2/userInfo"
+                ),
+                client_id=user_pool_client.user_pool_client_id,
+                client_secret=user_pool_client.user_pool_client_secret,
+                scope="openid email",
+                next=elbv2.ListenerAction.forward([target_group]),
+            ),
+        )
+
+        alb_origin = origins.LoadBalancerV2Origin(
+            alb,
+            protocol_policy=cf.OriginProtocolPolicy.HTTPS_ONLY,
         )
 
         distribution = cf.Distribution(
             self,
             "PlannerDistribution",
             default_behavior=cf.BehaviorOptions(
-                origin=ec2_origin,
+                origin=alb_origin,
                 viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 allowed_methods=cf.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
                 cache_policy=cf.CachePolicy.CACHING_DISABLED,
                 origin_request_policy=cf.OriginRequestPolicy.ALL_VIEWER,
-                edge_lambdas=[
-                    cf.EdgeLambda(
-                        function_version=edge_auth_version,
-                        event_type=cf.LambdaEdgeEventType.VIEWER_REQUEST,
-                    )
-                ],
             ),
             domain_names=[domain_name],
             certificate=cert,
@@ -527,6 +573,6 @@ class HousePlannerStack(Stack):
                 f"?client_id={user_pool_client.user_pool_client_id}"
                 f"&response_type=code"
                 f"&scope=openid+email"
-                f"&redirect_uri=https://{domain_name}/_auth/callback"
+                f"&redirect_uri=https://{domain_name}/oauth2/idpresponse"
             ),
         )

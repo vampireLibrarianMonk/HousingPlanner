@@ -1,224 +1,164 @@
 # Cognito-Authorization-Instructions.md
 
-This document validates and explains the **Cognito authorization model** used by the **HousePlannerStack**, mirroring the structure and intent of `Deploy-Check.md`.
-
-It focuses on **who can access what**, **how authentication is enforced**, and **how to operate Cognito safely** using **AWS CLI only**, with **all required identifiers exported programmatically as environment variables**.
-
-> Scope: Streamlit UI (CloudFront + Lambda@Edge) and API Gateway (`/api/status`, `/api/start`).
+This document describes the **final authentication and authorization model** for the HousePlanner deployment.
+It mirrors the structure and operational tone of `Deploy-Check.md` and is intended for **immediate operational use**.
 
 ---
 
-## 0. Authorization Model (At a Glance)
+## 0. Authentication Model (Final)
 
 | Surface | Auth Mechanism | Enforcement Point |
 |------|---------------|-------------------|
-| Streamlit UI | Cognito Hosted UI | CloudFront (Lambda@Edge) |
+| Streamlit UI | Cognito Hosted UI (OIDC) | Application Load Balancer |
 | `/api/status` | Cognito User Pool | API Gateway Authorizer |
-| `/api/start` | Cognito + `admin` group | API Gateway + Lambda check |
+| `/api/start` | Cognito + `admin` group | API Gateway + Lambda |
 
-All entry points require **valid Cognito authentication**. There are **no public endpoints**.
+Key rules:
+
+- CloudFront does **not** perform authentication.
+- Authentication for the UI happens **at the ALB**, before EC2.
+- Lambda@Edge is **not used for auth**.
+- No secrets are stored in CloudFront, Edge, or client code.
 
 ---
 
-## 1. Export Required Cognito Identifiers (Programmatic)
+## 1. Required Environment Variables
 
-All Cognito identifiers are derived **directly from CloudFormation**, never hard‑coded.
+```bash
+export STACK_NAME="HousePlannerStack"
+export AWS_REGION="us-east-1"
+```
 
-### Export User Pool ID
+---
+
+## 2. Export Cognito Identifiers (Programmatic)
+
+### Cognito User Pool ID
 
 ```bash
 export COGNITO_USER_POOL_ID=$(aws cloudformation list-stack-resources \
-  --stack-name HousePlannerStack \
-  --query "StackResourceSummaries[?ResourceType=='AWS::Cognito::UserPool'].PhysicalResourceId | [0]" \
-  --output text)
-```
-
-Verify:
-```bash
-aws cognito-idp describe-user-pool \
-  --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --query "UserPool.Name" \
-  --output text
+--region "$AWS_REGION" \
+--stack-name "$STACK_NAME" \
+--query "StackResourceSummaries[?ResourceType=='AWS::Cognito::UserPool'].PhysicalResourceId | [0]" \
+--output text)
 ```
 
 ---
 
-### Export User Pool Client ID
+### Cognito User Pool Client ID
 
 ```bash
 export COGNITO_USER_POOL_CLIENT_ID=$(aws cloudformation list-stack-resources \
-  --stack-name HousePlannerStack \
-  --query "StackResourceSummaries[?ResourceType=='AWS::Cognito::UserPoolClient'].PhysicalResourceId | [0]" \
-  --output text)
+--region "$AWS_REGION" \
+--stack-name "$STACK_NAME" \
+--query "StackResourceSummaries[?ResourceType=='AWS::Cognito::UserPoolClient'].PhysicalResourceId | [0]" \
+--output text)
 ```
 
 ---
 
-### Export Cognito Hosted UI Domain
+### Cognito Hosted UI Domain Prefix
 
 ```bash
 export COGNITO_DOMAIN_PREFIX=$(aws cloudformation list-stack-resources \
-  --stack-name HousePlannerStack \
-  --query "StackResourceSummaries[?LogicalResourceId=='HousePlannerCognitoDomain'].PhysicalResourceId | [0]" \
+--region "$AWS_REGION" \
+--stack-name "$STACK_NAME" \
+--query "StackResourceSummaries[?ResourceType=='AWS::Cognito::UserPoolDomain'].PhysicalResourceId | [0]" \
+--output text)
+```
+
+---
+
+## 3. Export UI and API Endpoints
+
+### UI Base URL
+
+```bash
+export UI_BASE_URL=$(aws cloudformation describe-stacks \
+  --region "$AWS_REGION" \
+  --stack-name "$STACK_NAME" \
+  --query "Stacks[0].Outputs[?OutputKey=='StreamlitUiUrl'].OutputValue | [0]" \
   --output text)
 ```
 
 ---
 
-### Export Cognito Login URL
+### Cognito Login URL (ALB Callback)
 
 ```bash
-export COGNITO_LOGIN_URL="https://${COGNITO_DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognito.com/login?client_id=${COGNITO_USER_POOL_CLIENT_ID}&response_type=code&scope=openid+email&redirect_uri=https://app.housing-planner.com"
-
-echo "$COGNITO_LOGIN_URL"
+export COGNITO_LOGIN_URL="https://${COGNITO_DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognito.com/login?client_id=${COGNITO_USER_POOL_CLIENT_ID}&response_type=code&scope=openid+email&redirect_uri=${UI_BASE_URL}/oauth2/idpresponse"
 ```
 
 ---
 
-## 2. Creating a User (Invite‑Only)
+## 4. User Management (Invite Only)
 
-Self sign‑up is disabled. Users must be created by an operator.
+### Create User
 
-### Create user
+Note: Using --message-action SUPPRESS creates the user silently with no email notification. Remove this flag to have Cognito send the default welcome email and temporary password. When suppressing email, a permanent password must be set manually.
 
 ```bash
 aws cognito-idp admin-create-user \
+  --region "$AWS_REGION" \
   --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --username user@example.com \
-  --user-attributes Name=email,Value=user@example.com \
-  --message-action SUPPRESS
+  --username pmflani@gmail.com \
+  --user-attributes \
+    Name=email,Value=pmflani@gmail.com \
+    Name=name,Value="Patrick Flanigan" \
+  --message-action SUPPRESS 
 ```
 
-### Set permanent password
+### Set Permanent Password
 
 ```bash
 aws cognito-idp admin-set-user-password \
+  --region "$AWS_REGION" \
   --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --username user@example.com \
-  --password '<StrongPasswordHere>' \
+  --username pmflani@gmail.com \
+  --password '#12delta,HOUSING' \
   --permanent
 ```
 
 ---
 
-## 3. Granting Admin Privileges (Required for `/api/start`)
-
-Only users in the `admin` group may start the EC2 instance.
+## 5. Admin Privileges
 
 ```bash
 aws cognito-idp admin-add-user-to-group \
-  --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --username user@example.com \
-  --group-name admin
-```
-
-Verify:
-
-```bash
-aws cognito-idp admin-list-groups-for-user \
-  --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --username user@example.com
+--region "$AWS_REGION" \
+--user-pool-id "$COGNITO_USER_POOL_ID" \
+--username pmflani@gmail.com \
+--group-name admin
 ```
 
 ---
 
-## 4. Streamlit UI Authorization Flow
+## 6. UI Auth Flow
 
-1. User navigates to:
-   ```
-   https://app.housing-planner.com/
-   ```
-2. CloudFront invokes **Lambda@Edge** on every request.
-3. If unauthenticated:
-   - User is redirected to `$COGNITO_LOGIN_URL`.
-4. After login:
-   - Cognito redirects back to CloudFront.
-   - UI access is granted.
-
-The EC2 instance is **never reachable** without Cognito authentication.
+1. User accesses the CloudFront URL
+2. ALB enforces Cognito OIDC authentication
+3. Cognito redirects to `/oauth2/idpresponse`
+4. ALB forwards authenticated traffic to EC2
 
 ---
 
-## 5. API Authorization Flow (API Gateway)
+## 7. API Authorization
 
-All API endpoints require a **Bearer access token**.
-
-### Call `/api/status`
-
-```bash
-curl -i \
-  -H "Authorization: Bearer <ACCESS_TOKEN>" \
-  https://<api-id>.execute-api.<region>.amazonaws.com/prod/api/status
-```
-
-Expected:
-- `200 OK`
-
-Without token:
-- `401 Unauthorized`
+All API requests require a Cognito access token.
 
 ---
 
-## 6. Admin‑Only `/api/start` Enforcement
-
-Two layers:
-
-1. **API Gateway Cognito Authorizer** (valid token)
-2. **Lambda group check** (`cognito:groups` contains `admin`)
-
-```bash
-curl -i -X POST \
-  -H "Authorization: Bearer <ACCESS_TOKEN>" \
-  https://<api-id>.execute-api.<region>.amazonaws.com/prod/api/start
-```
-
-Expected:
-- `200 OK` → EC2 starts
-
-Non‑admin:
-- `403 Forbidden`
-
----
-
-## 7. Failure Modes (Expected)
+## 8. Failure Modes
 
 | Scenario | Result |
-|-------|--------|
-| No token | 401 |
-| Expired token | 401 |
-| Valid token, not admin | 403 |
-| Forged group claim | 403 |
+|------|--------|
+| UI unauthenticated | Redirect to Cognito |
+| API unauthenticated | 401 |
+| API non-admin start | 403 |
 | Direct EC2 access | Blocked |
 
 ---
 
-## 8. Operational Safety Notes
+## 9. Summary
 
-- Cognito is the **single source of identity**
-- All identifiers are **programmatically derived**
-- No secrets exist in Streamlit or CloudFront
-- Admin access is auditable and revocable
-
----
-
-## 9. Decommission / Lockdown
-
-```bash
-aws cognito-idp update-user-pool \
-  --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --admin-create-user-config AllowAdminCreateUserOnly=true
-```
-
----
-
-## 10. Summary
-
-This model provides:
-
-- Centralized identity
-- Strong authentication
-- Explicit admin controls
-- Zero‑trust edge enforcement
-- Fully scriptable operations
-
-It is appropriate for **small trusted user groups** with **production‑grade security guarantees**.
+This model provides secure, AWS-supported authentication without secrets at the edge.
