@@ -70,6 +70,12 @@ class HousePlannerStack(Stack):
             path="service/idle-shutdown.service",
         )
 
+        idle_timer_asset = s3_assets.Asset(
+            self,
+            "IdleShutdownTimer",
+            path="service/idle-shutdown.timer",
+        )
+
         ssh_cidr = self.node.try_get_context("ssh_cidr")
         if not ssh_cidr:
             raise ValueError("Missing required context value: ssh_cidr")
@@ -204,11 +210,14 @@ class HousePlannerStack(Stack):
             "echo '[CHECK] Installing idle shutdown systemd service'",
             f"aws s3 cp {idle_service_asset.s3_object_url} /etc/systemd/system/idle-shutdown.service",
 
+            "echo '[CHECK] Installing idle shutdown systemd timer'",
+            f"aws s3 cp {idle_timer_asset.s3_object_url} /etc/systemd/system/idle-shutdown.timer"
+
             "systemctl daemon-reexec",
             "systemctl daemon-reload",
             "systemctl enable idle-shutdown.service",
             "systemctl start idle-shutdown.service",
-            "systemctl is-active idle-shutdown.service || (echo '[FATAL] idle-shutdown not running' && exit 1)",
+            "systemctl list-timers | grep idle-shutdown || (echo '[FATAL] idle-shutdown timer not running' && exit 1)",
 
             # ------------------------------------------------------------
             # Nginx reverse proxy (port 80 → Streamlit :8501)
