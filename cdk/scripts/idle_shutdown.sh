@@ -1,63 +1,84 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =====================================================
+# ============================================
 # Configuration
-# =====================================================
-IDLE_LIMIT=3600        # seconds until shutdown
-CHECK_INTERVAL=60      # seconds between checks
+# ============================================
 NGINX_ACCESS_LOG="/var/log/nginx/access.log"
+STATE_DIR="/var/lib/idle-shutdown"
+STATE_FILE="${STATE_DIR}/first_idle_ts"
 
-# =====================================================
-# State
-# =====================================================
-idle_start_ts=""
+IDLE_THRESHOLD_SECONDS=3600   # 1 hour
+LOG_SCAN_LINES=500
 
+# ============================================
+# Helpers
+# ============================================
 log() {
-    echo "$(date -u +"%Y-%m-%dT%H:%M:%S+00:00") | $*"
+  echo "$(date -Iseconds) | $1"
 }
 
-# =====================================================
-# Activity detection (nginx log mtime)
-# =====================================================
+mkdir -p "$STATE_DIR"
+
+# ============================================
+# Detect real (human) traffic
+# ============================================
 is_active() {
-    [[ ! -f "$NGINX_ACCESS_LOG" ]] && return 1
+  [[ ! -f "$NGINX_ACCESS_LOG" ]] && return 1
 
-    local now last_hit
-    now=$(date +%s)
-    last_hit=$(stat -c %Y "$NGINX_ACCESS_LOG")
+  local now ts_raw ts_epoch line
+  now=$(date +%s)
 
-    # Active if nginx handled any request in last 5 minutes
-    (( now - last_hit < 300 ))
-}
-
-# =====================================================
-# Main loop
-# =====================================================
-log "[START] Idle shutdown monitor started"
-log "[CONFIG] idle_limit=${IDLE_LIMIT}s interval=${CHECK_INTERVAL}s"
-
-while true; do
-    if is_active; then
-        idle_start_ts=""
-        log "[ACTIVE] Recent nginx traffic detected"
-    else
-        if [[ -z "$idle_start_ts" ]]; then
-            idle_start_ts=$(date +%s)
-            log "[IDLE] No recent traffic — idle timer started"
-        else
-            now=$(date +%s)
-            elapsed=$(( now - idle_start_ts ))
-
-            log "[IDLE] ${elapsed}s / ${IDLE_LIMIT}s elapsed"
-
-            if (( elapsed >= IDLE_LIMIT )); then
-                log "[SHUTDOWN] Idle limit reached — stopping instance"
-                sudo shutdown -h now
-                exit 0
-            fi
-        fi
+  tail -n "$LOG_SCAN_LINES" "$NGINX_ACCESS_LOG" | while IFS= read -r line; do
+    # Ignore infrastructure noise
+    if [[ "$line" == *"ELB-HealthChecker"* ]] || [[ "$line" == *"CloudFront"* ]]; then
+      continue
     fi
 
-    sleep "$CHECK_INTERVAL"
-done
+    # Extract nginx timestamp: [17/Jan/2026:03:12:34 +0000]
+    ts_raw=$(awk '{print $4" "$5}' <<<"$line" | tr -d '[]')
+    ts_epoch=$(date -d "$ts_raw" +%s 2>/dev/null || true)
+    [[ -z "$ts_epoch" ]] && continue
+
+    if (( now - ts_epoch < IDLE_THRESHOLD_SECONDS )); then
+      exit 0
+    fi
+  done
+
+  return 1
+}
+
+# ============================================
+# Main logic
+# ============================================
+NOW=$(date +%s)
+
+if is_active; then
+  if [[ -f "$STATE_FILE" ]]; then
+    log "[ACTIVE] Traffic detected — clearing idle timer"
+    rm -f "$STATE_FILE"
+  else
+    log "[ACTIVE] Traffic detected"
+  fi
+  exit 0
+fi
+
+# No real traffic
+if [[ ! -f "$STATE_FILE" ]]; then
+  echo "$NOW" > "$STATE_FILE"
+  log "[IDLE] First idle detection — starting 1h timer"
+  exit 0
+fi
+
+FIRST_IDLE=$(cat "$STATE_FILE")
+IDLE_DURATION=$(( NOW - FIRST_IDLE ))
+
+if (( IDLE_DURATION >= IDLE_THRESHOLD_SECONDS )); then
+  log "[IDLE] Idle for ${IDLE_DURATION}s (>=1h) — shutting down"
+  /sbin/shutdown -h now
+else
+  REMAINING=$(( IDLE_THRESHOLD_SECONDS - IDLE_DURATION ))
+  log "[IDLE] Idle ${IDLE_DURATION}s — shutdown in ${REMAINING}s if no activity"
+fi
+
+exit 0
