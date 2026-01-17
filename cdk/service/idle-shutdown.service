@@ -1,0 +1,16 @@
+[Unit]
+Description=Idle Shutdown Monitor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/idle_shutdown.sh
+Restart=on-failure
+RestartSec=10
+
+# Prevent duplicate processes
+PIDFile=/run/idle-shutdown.pid
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
