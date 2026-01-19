@@ -121,7 +121,7 @@ cdk synth
 
 # 10. Deploy
 ```bash
-cdk deploy \
+cdk deploy --all \
   -c ssh_cidr="$MY_PUBLIC_IP" \
   -c cloudfront_pl_id="$CLOUDFRONT_PL_ID"
 ```

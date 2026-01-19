@@ -11,6 +11,8 @@ STATE_FILE="${STATE_DIR}/first_idle_ts"
 IDLE_THRESHOLD_SECONDS=3600   # 1 hour
 LOG_SCAN_LINES=500
 
+BOOT_GRACE_SECONDS=600        # 10 minutes after boot
+
 # ============================================
 # Helpers
 # ============================================
@@ -19,6 +21,17 @@ log() {
 }
 
 mkdir -p "$STATE_DIR"
+
+# ============================================
+# Reset idle state on fresh boot
+# ============================================
+UPTIME=$(cut -d. -f1 /proc/uptime)
+
+if (( UPTIME < BOOT_GRACE_SECONDS )); then
+  log "[BOOT] Uptime ${UPTIME}s < grace period (${BOOT_GRACE_SECONDS}s) — clearing idle state"
+  rm -f "$STATE_FILE"
+  exit 0
+fi
 
 # ============================================
 # Detect real (human) traffic
@@ -31,7 +44,9 @@ is_active() {
 
   tail -n "$LOG_SCAN_LINES" "$NGINX_ACCESS_LOG" | while IFS= read -r line; do
     # Ignore infrastructure noise
-    if [[ "$line" == *"ELB-HealthChecker"* ]] || [[ "$line" == *"CloudFront"* ]]; then
+    if [[ "$line" == *"ELB-HealthChecker"* ]] \
+       || [[ "$line" == *"CloudFront"* ]] \
+       || [[ "$line" == *"127.0.0.1"* ]]; then
       continue
     fi
 
@@ -63,10 +78,10 @@ if is_active; then
   exit 0
 fi
 
-# No real traffic
+# No real traffic detected
 if [[ ! -f "$STATE_FILE" ]]; then
   echo "$NOW" > "$STATE_FILE"
-  log "[IDLE] First idle detection — starting 1h timer"
+  log "[IDLE] First idle detection — starting ${IDLE_THRESHOLD_SECONDS}s timer"
   exit 0
 fi
 
@@ -74,7 +89,7 @@ FIRST_IDLE=$(cat "$STATE_FILE")
 IDLE_DURATION=$(( NOW - FIRST_IDLE ))
 
 if (( IDLE_DURATION >= IDLE_THRESHOLD_SECONDS )); then
-  log "[IDLE] Idle for ${IDLE_DURATION}s (>=1h) — shutting down"
+  log "[IDLE] Idle for ${IDLE_DURATION}s (>=${IDLE_THRESHOLD_SECONDS}s) — shutting down"
   /sbin/shutdown -h now
 else
   REMAINING=$(( IDLE_THRESHOLD_SECONDS - IDLE_DURATION ))

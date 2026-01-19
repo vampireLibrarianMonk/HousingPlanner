@@ -75,7 +75,32 @@ This guide assumes you **already have** a valid Cognito user and know how to aut
 Export a **valid ID token** before proceeding.
 
 ```bash
-export ID_TOKEN="<paste-valid-cognito-id-token-here>"
+CLIENT_ID="xxxxxxxxxxxxxxxxxxxx"
+CLIENT_SECRET="yyyyyyyyyyyyyyyyyyyy"
+USERNAME="user@example.com"
+PASSWORD="super-secret-password"
+
+# --- Compute SECRET_HASH ---
+SECRET_HASH=$(echo -n "${USERNAME}${CLIENT_ID}" | \
+  openssl dgst -sha256 -hmac "${CLIENT_SECRET}" -binary | \
+  base64)
+
+# --- Authenticate and capture response ---
+AUTH_RESPONSE=$(aws cognito-idp initiate-auth \
+  --auth-flow USER_PASSWORD_AUTH \
+  --client-id "$CLIENT_ID" \
+  --auth-parameters \
+    USERNAME="$USERNAME",PASSWORD="$PASSWORD",SECRET_HASH="$SECRET_HASH")
+
+# --- Export tokens ---
+export ID_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.AuthenticationResult.IdToken')
+export ACCESS_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.AuthenticationResult.AccessToken')
+export REFRESH_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.AuthenticationResult.RefreshToken')
+
+echo "Tokens exported:"
+echo "  ID_TOKEN      = ${#ID_TOKEN} chars"
+echo "  ACCESS_TOKEN  = ${#ACCESS_TOKEN} chars"
+echo "  REFRESH_TOKEN = ${#REFRESH_TOKEN} chars"
 ```
 
 You will reuse this token for all API calls below.
