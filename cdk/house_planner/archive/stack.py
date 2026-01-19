@@ -1,21 +1,20 @@
 from aws_cdk import (
     Stack,
-    Duration,
     CfnOutput,
     aws_ec2 as ec2,
     aws_elasticloadbalancingv2 as elbv2,
-    aws_elasticloadbalancingv2_targets as elbv2_targets,
-    aws_lambda as _lambda,
-    aws_apigateway as apigw,
+    aws_events as events,
+    aws_events_targets as targets,
     aws_iam as iam,
     aws_cloudfront as cf,
     aws_cloudfront_origins as origins,
     aws_certificatemanager as acm,
+    aws_lambda as _lambda,
     aws_route53 as r53,
     aws_route53_targets as r53_targets,
     aws_s3_assets as s3_assets,
     aws_cognito as cognito,
-    Environment,
+    Environment, Duration,
 )
 from constructs import Construct
 import hashlib
@@ -55,6 +54,17 @@ class HousePlannerStack(Stack):
                     cidr_mask=24,
                 )
             ],
+        )
+
+        # --- REQUIRED VPC endpoints for EC2 bootstrap ---
+        vpc.add_gateway_endpoint(
+            "S3Endpoint",
+            service=ec2.GatewayVpcEndpointAwsService.S3,
+        )
+
+        vpc.add_interface_endpoint(
+            "SecretsManagerEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
         )
 
         # --- EC2 Instance ---
@@ -152,33 +162,10 @@ class HousePlannerStack(Stack):
             ),
         )
 
-        # --- Cognito group for admin-only actions (e.g., /api/start) ---
-        admin_group = cognito.CfnUserPoolGroup(
-            self,
-            "HousePlannerAdminGroup",
-            user_pool_id=user_pool.user_pool_id,
-            group_name="admin",
-            description="Admins allowed to start the EC2 instance",
-        )
-
-        instance = ec2.Instance(
-            self,
-            "HousePlannerEC2",
-            vpc=vpc,
-            instance_type=ec2.InstanceType("t4g.small"),
-            machine_image=ec2.MachineImage.latest_amazon_linux2023(
-                cpu_type=ec2.AmazonLinuxCpuType.ARM_64
-            ),
-            security_group=sg,
-            key_pair=ec2.KeyPair.from_key_pair_name(
-                self,
-                "HousePlannerKeyPair",
-                "houseplanner-key",
-            ),
-        )
+        user_data = ec2.UserData.for_linux()
 
         # --- User data: idle shutdown + HousingPlanner bootstrap (SSH via key pair) ---
-        instance.user_data.add_commands(
+        user_data.add_commands(
             "#!/bin/bash",
             "set -euxo pipefail",
 
@@ -211,7 +198,7 @@ class HousePlannerStack(Stack):
             f"aws s3 cp {idle_service_asset.s3_object_url} /etc/systemd/system/idle-shutdown.service",
 
             "echo '[CHECK] Installing idle shutdown systemd timer'",
-            f"aws s3 cp {idle_timer_asset.s3_object_url} /etc/systemd/system/idle-shutdown.timer"
+            f"aws s3 cp {idle_timer_asset.s3_object_url} /etc/systemd/system/idle-shutdown.timer",
 
             "systemctl daemon-reexec",
             "systemctl daemon-reload",
@@ -229,6 +216,26 @@ class HousePlannerStack(Stack):
             "systemctl start nginx",
             "systemctl is-active nginx || (echo '[FATAL] nginx not running' && exit 1)",
 
+            # ------------------------------------------------------------
+            # Nginx startup fallback page
+            # ------------------------------------------------------------
+            "echo '[CHECK] Writing nginx startup splash page'",
+            "cat > /usr/share/nginx/html/starting.html << 'EOF'\n"
+            "<html>\n"
+            "<head>\n"
+            "  <title>House Planner</title>\n"
+            "  <meta http-equiv=\"refresh\" content=\"10\">\n"
+            "</head>\n"
+            "<body>\n"
+            "  <h1>Starting your workspace…</h1>\n"
+            "  <p>This usually takes under a minute.</p>\n"
+            "</body>\n"
+            "</html>\n"
+            "EOF",
+
+            # ------------------------------------------------------------
+            # Nginx Streamlit reverse proxy config
+            # ------------------------------------------------------------
             "echo '[CHECK] Writing nginx Streamlit reverse proxy config'",
 
             "cat > /etc/nginx/conf.d/streamlit.conf << 'EOF'\n"
@@ -236,7 +243,10 @@ class HousePlannerStack(Stack):
             "    listen 80 default_server;\n"
             "    server_name _;\n\n"
             "    location / {\n"
+            "        proxy_connect_timeout 5s;\n"
+            "        proxy_read_timeout 30s;\n"
             "        proxy_pass http://127.0.0.1:8501;\n"
+            "        error_page 502 503 504 = /starting.html;\n"
             "        proxy_http_version 1.1;\n"
             "        proxy_set_header Host $host;\n"
             "        proxy_set_header X-Real-IP $remote_addr;\n"
@@ -272,32 +282,31 @@ class HousePlannerStack(Stack):
             "git clone https://github.com/vampireLibrarianMonk/HousingPlanner.git || true && "
             "cd HousingPlanner && "
             "git fetch && "
-            # "git checkout base-prototype-aws-only-integration && "
 
             # Python venv
             "python3.12 -m venv .venv && "
             "source .venv/bin/activate && "
 
             # Dependencies
-            "python -m pip install --upgrade pip && "   
+            "python -m pip install --upgrade pip && "
             "python -m pip install -r requirements.txt && "
-            
+
             # Ensure log directory exists
             "mkdir -p /home/ec2-user/logs && "
             "ls -ld /home/ec2-user/logs && "
-            
+
             # Environment Variables (INLINE, REAL EXPORTS)
             "export ORS_API_KEY=$(aws secretsmanager get-secret-value "
             "--secret-id houseplanner/ors_api_key "
             "--query SecretString "
             "--output text) && "
-            
+
             "export GOOGLE_MAPS_API_KEY=$(aws secretsmanager get-secret-value "
-            "--secret-id houseplanner/google_maps_api_key  "
+            "--secret-id houseplanner/google_maps_api_key "
             "--query SecretString "
             "--output text) && "
 
-            # Launch Streamlit (USER-OWNED LOG FILE, PROXY + HTTPS AWARE)
+            # Launch Streamlit
             "nohup streamlit run app.py "
             "--server.address=127.0.0.1 "
             "--server.port=8501 "
@@ -313,102 +322,55 @@ class HousePlannerStack(Stack):
             "echo '===== [SUCCESS] Instance fully initialized ====='",
         )
 
-        idle_script_asset.grant_read(instance.role)
-        idle_service_asset.grant_read(instance.role)
-
-        instance.role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["secretsmanager:GetSecretValue"],
-                resources=[
-                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:houseplanner/ors_api_key*",
-                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:houseplanner/google_maps_api_key*",
-                ],
-            )
-        )
-
-        # Start STOPPED
-        instance.instance_initiated_shutdown_behavior = (
-            ec2.InstanceInitiatedShutdownBehavior.STOP
-        )
-
-        instance_env = {
-            "INSTANCE_ID": instance.instance_id,
-        }
-
-        # --- Lambda: Start EC2 ---
-        start_lambda = _lambda.Function(
+        user_instance_role = iam.Role(
             self,
-            "StartInstanceLambda",
-            runtime=_lambda.Runtime.PYTHON_3_12,
-            handler="start_instance.lambda_handler",
-            code=_lambda.Code.from_asset("lambda"),
-            environment={
-                **instance_env,
-                "ADMIN_GROUP": "admin",
-            },
-            timeout=Duration.seconds(10),
+            "HousePlannerUserInstanceRole",
+            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
         )
 
-        start_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["ec2:StartInstances"],
-                resources=[
-                    f"arn:aws:ec2:{self.region}:{self.account}:instance/{instance.instance_id}"
-                ],
-            )
-        )
-
-        start_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["ec2:DescribeInstances"],
-                resources=["*"],  # required by AWS
-            )
-        )
-
-        # --- Lambda: Status Page ---
-        status_lambda = _lambda.Function(
+        launch_template = ec2.LaunchTemplate(
             self,
-            "StatusPageLambda",
-            runtime=_lambda.Runtime.PYTHON_3_12,
-            handler="status_page.lambda_handler",
-            code=_lambda.Code.from_asset("lambda"),
-            environment=instance_env,
-            timeout=Duration.seconds(10),
+            "HousePlannerUserLaunchTemplate",
+            instance_type=ec2.InstanceType("t4g.small"),
+            machine_image=ec2.MachineImage.latest_amazon_linux2023(
+                cpu_type=ec2.AmazonLinuxCpuType.ARM_64
+            ),
+            security_group=sg,
+            key_pair=ec2.KeyPair.from_key_pair_name(
+                self,
+                "HousePlannerKeyPair",
+                "houseplanner-key",
+            ),
+            role=user_instance_role,  # 👈 REQUIRED
+            user_data=user_data,
         )
 
-        status_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["ec2:DescribeInstances"],
-                resources=["*"],
-            )
-        )
-
-        # --- API Gateway ---
-        api = apigw.RestApi(self, "HousePlannerAPI")
-
-        api_root = api.root.add_resource("api")
-
-        # --- Cognito authorizer (protect ALL API endpoints per your choice B=No) ---
-        cognito_authorizer = apigw.CognitoUserPoolsAuthorizer(
+        alb_sg = ec2.SecurityGroup(
             self,
-            "HousePlannerApiAuthorizer",
-            cognito_user_pools=[user_pool],
+            "HousePlannerAlbSG",
+            vpc=vpc,
+            description="ALB security group CloudFront to ALB",
+            allow_all_outbound=True,
         )
 
-        status = api_root.add_resource("status")
-        status.add_method(
-            "GET",
-            apigw.LambdaIntegration(status_lambda),
-            authorization_type=apigw.AuthorizationType.COGNITO,
-            authorizer=cognito_authorizer,
+        # Allow HTTPS to ALB only from CloudFront origin-facing prefix list
+        alb_sg.add_ingress_rule(
+            ec2.Peer.prefix_list(cloudfront_origin_pl.prefix_list_id),
+            ec2.Port.tcp(443),
+            "Allow HTTPS from CloudFront origin only",
         )
 
-        start = api_root.add_resource("start")
-        start.add_method(
-            "POST",
-            apigw.LambdaIntegration(start_lambda),
-            authorization_type=apigw.AuthorizationType.COGNITO,
-            authorizer=cognito_authorizer,
+        alb = elbv2.ApplicationLoadBalancer(
+            self,
+            "HousePlannerALB",
+            vpc=vpc,
+            internet_facing=True,
+            security_group=alb_sg,
+        )
+
+        alb_origin = origins.LoadBalancerV2Origin(
+            alb,
+            protocol_policy=cf.OriginProtocolPolicy.HTTPS_ONLY,
         )
 
         # ==========================================================
@@ -427,63 +389,14 @@ class HousePlannerStack(Stack):
             validation=acm.CertificateValidation.from_dns(zone),
         )
 
-        # ==========================================================
-        # ALB (Cognito auth happens here, not at Lambda@Edge)
-        # ==========================================================
-
-        alb_sg = ec2.SecurityGroup(
-            self,
-            "HousePlannerAlbSG",
-            vpc=vpc,
-            description="ALB security group CloudFront to ALB",
-            allow_all_outbound=True,
-        )
-
-        # Allow HTTPS to ALB only from CloudFront origin-facing prefix list
-        alb_sg.add_ingress_rule(
-            ec2.Peer.prefix_list(cloudfront_origin_pl.prefix_list_id),
-            ec2.Port.tcp(443),
-            "Allow HTTPS from CloudFront origin only",
-        )
-
-        # EC2 should accept HTTP only from the ALB now (not directly from CloudFront)
-        # (Replace the old CloudFront->EC2 ingress rule with this)
-        # Allow ALB to reach EC2 on port 80
-        sg.add_ingress_rule(
-            alb_sg,
-            ec2.Port.tcp(80),
-            "Allow HTTP from ALB only",
-        )
-
-        alb = elbv2.ApplicationLoadBalancer(
-            self,
-            "HousePlannerALB",
-            vpc=vpc,
-            internet_facing=True,
-            security_group=alb_sg,
-        )
-
         https_listener = alb.add_listener(
             "HttpsListener",
             port=443,
             certificates=[elbv2.ListenerCertificate(cert.certificate_arn)],
         )
 
-        target_group = elbv2.ApplicationTargetGroup(
-            self,
-            "HousePlannerTargetGroup",
-            vpc=vpc,
-            port=80,
-            protocol=elbv2.ApplicationProtocol.HTTP,
-            targets=[elbv2_targets.InstanceTarget(instance, port=80)],
-            health_check=elbv2.HealthCheck(
-                path="/",
-                healthy_http_codes="200-499",
-            ),
-        )
-
         https_listener.add_action(
-            "OidcAuthThenForward",
+            "OidcAuthOnly",
             action=elbv2.ListenerAction.authenticate_oidc(
                 issuer=f"https://cognito-idp.{self.region}.amazonaws.com/{user_pool.user_pool_id}",
                 authorization_endpoint=(
@@ -501,13 +414,121 @@ class HousePlannerStack(Stack):
                 client_id=user_pool_client.user_pool_client_id,
                 client_secret=user_pool_client.user_pool_client_secret,
                 scope="openid email",
-                next=elbv2.ListenerAction.forward([target_group]),
+                next=elbv2.ListenerAction.fixed_response(
+                    status_code=403,
+                    content_type="text/plain",
+                    message_body="No workspace is assigned to this user.",
+                ),
             ),
         )
 
-        alb_origin = origins.LoadBalancerV2Origin(
-            alb,
-            protocol_policy=cf.OriginProtocolPolicy.HTTPS_ONLY,
+        create_user_instance = _lambda.Function(
+            self,
+            "CreateUserEc2Instance",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="create_instance.lambda_handler",
+            code=_lambda.Code.from_asset("lambda"),
+            timeout=Duration.seconds(60),
+            environment={
+                "LAUNCH_TEMPLATE_ID": launch_template.launch_template_id,
+                "SUBNET_ID": vpc.public_subnets[0].subnet_id,
+                "ALB_LISTENER_ARN": https_listener.listener_arn,  # 👈 NEW
+                "VPC_ID": vpc.vpc_id,  # 👈 NEW
+            },
+        )
+
+        create_user_instance.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ec2:RunInstances",
+                    "ec2:CreateTags",
+                    "elasticloadbalancing:CreateTargetGroup",
+                    "elasticloadbalancing:RegisterTargets",
+                    "elasticloadbalancing:CreateRule",
+                    "elasticloadbalancing:AddTags",
+                ],
+                resources=["*"],
+            )
+        )
+
+        delete_user_resources = _lambda.Function(
+            self,
+            "DeleteUserEc2Resources",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="delete_instance.lambda_handler",
+            code=_lambda.Code.from_asset("lambda"),
+            timeout=Duration.seconds(60),
+            environment={
+                "ALB_LISTENER_ARN": https_listener.listener_arn,
+            },
+        )
+
+        delete_user_resources.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ec2:DescribeInstances",
+                    "ec2:TerminateInstances",
+
+                    "elasticloadbalancing:DescribeRules",
+                    "elasticloadbalancing:DeleteRule",
+                    "elasticloadbalancing:DescribeTargetGroups",
+                    "elasticloadbalancing:DeleteTargetGroup",
+                    "elasticloadbalancing:DescribeTags",
+                ],
+                resources=["*"],
+            )
+        )
+
+        user_delete_rule = events.Rule(
+            self,
+            "CognitoUserDeleteRule",
+            event_pattern=events.EventPattern(
+                source=["aws.cognito-idp"],
+                detail_type=["AWS API Call via CloudTrail"],
+                detail={
+                    "eventSource": ["cognito-idp.amazonaws.com"],
+                    "eventName": ["AdminDeleteUser"],
+                    "requestParameters": {
+                        "userPoolId": [user_pool.user_pool_id]
+                    },
+                },
+            ),
+        )
+
+        user_delete_rule.add_target(
+            targets.LambdaFunction(delete_user_resources)
+        )
+
+        idle_script_asset.grant_read(user_instance_role)
+        idle_service_asset.grant_read(user_instance_role)
+        idle_timer_asset.grant_read(user_instance_role)
+
+        user_instance_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:houseplanner/ors_api_key*",
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:houseplanner/google_maps_api_key*",
+                ],
+            )
+        )
+
+        user_pool.add_trigger(
+            cognito.UserPoolOperation.POST_CONFIRMATION,
+            create_user_instance,
+        )
+
+        # ==========================================================
+        # ALB (Cognito auth happens here, not at Lambda@Edge)
+        # ==========================================================
+
+        # EC2 should accept HTTP only from the ALB now (not directly from CloudFront)
+        # (Replace the old CloudFront->EC2 ingress rule with this)
+        # Allow ALB to reach EC2 on port 80
+        sg.add_ingress_rule(
+            alb_sg,
+            ec2.Port.tcp(80),
+            "Allow HTTP from ALB only",
         )
 
         distribution = cf.Distribution(
@@ -535,30 +556,6 @@ class HousePlannerStack(Stack):
             target=r53.RecordTarget.from_alias(
                 r53_targets.CloudFrontTarget(distribution)
             ),
-        )
-
-        # -------------------------------
-        # API Gateway (direct, no CloudFront)
-        # -------------------------------
-
-        # Base invoke URL (includes stage, e.g. /prod/)
-        CfnOutput(
-            self,
-            "ApiGatewayBaseUrl",
-            value=api.url.rstrip("/"),
-        )
-
-        # Explicit API endpoints
-        CfnOutput(
-            self,
-            "ApiGatewayStatusUrl",
-            value=f"{api.url.rstrip('/')}/api/status",
-        )
-
-        CfnOutput(
-            self,
-            "ApiGatewayStartUrl",
-            value=f"{api.url.rstrip('/')}/api/start",
         )
 
         # -------------------------------
