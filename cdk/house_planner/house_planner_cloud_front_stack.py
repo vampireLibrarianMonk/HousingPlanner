@@ -87,57 +87,25 @@ class HousePlannerCloudFrontStack(Stack):
         # --------------------------------------------------
         # CloudFront origin (ALB)
         # --------------------------------------------------
+        # Configure for WebSocket support with longer timeouts
         alb_origin = origins.HttpOrigin(
             domain_name=alb_dns_name,
             protocol_policy=cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-        )
-
-        # --------------------------------------------------
-        # Cache Policy (no caching - pass everything through)
-        # --------------------------------------------------
-        # When caching is disabled (TTL=0), we cannot specify header_behavior.
-        # All headers/cookies/query strings are forwarded via the OriginRequestPolicy.
-        cache_policy = cloudfront.CachePolicy(
-            self,
-            "HousePlannerCachePolicy",
-            cache_policy_name="HousePlannerNoCache",
-            comment="No caching - all requests go to origin",
-            default_ttl=Duration.seconds(0),
-            max_ttl=Duration.seconds(0),
-            min_ttl=Duration.seconds(0),
-            # Note: header_behavior cannot be specified when caching is disabled
-            cookie_behavior=cloudfront.CacheCookieBehavior.none(),
-            query_string_behavior=cloudfront.CacheQueryStringBehavior.none(),
-        )
-
-        # --------------------------------------------------
-        # Origin Request Policy (forward auth headers/cookies)
-        # --------------------------------------------------
-        # Note: Authorization and Accept-Encoding cannot be specified here
-        # CloudFront handles these specially via cache policy settings
-        origin_request_policy = cloudfront.OriginRequestPolicy(
-            self,
-            "HousePlannerOriginRequestPolicy",
-            origin_request_policy_name="HousePlannerForwardAuth",
-            comment="Forward authentication headers and cookies to ALB",
-            cookie_behavior=cloudfront.OriginRequestCookieBehavior.all(),
-            query_string_behavior=cloudfront.OriginRequestQueryStringBehavior.all(),
-            header_behavior=cloudfront.OriginRequestHeaderBehavior.allow_list(
-                "Host",
-                "Origin",
-                "Referer",
-                "Accept",
-                "Accept-Language",
-            ),
+            # Longer timeouts for WebSocket connections (Streamlit uses WebSockets)
+            keepalive_timeout=Duration.seconds(60),
+            read_timeout=Duration.seconds(60),
         )
 
         # --------------------------------------------------
         # CloudFront Distribution
         # --------------------------------------------------
+        # Use managed policies for WebSocket support:
+        # - CACHING_DISABLED: No caching, all requests go to origin
+        # - ALL_VIEWER: Forward ALL headers (including WebSocket: Upgrade, Connection, Sec-WebSocket-*)
         distribution = cloudfront.Distribution(
             self,
             "HousePlannerDistribution",
-            comment="House Planner CDN",
+            comment="House Planner CDN with WebSocket support",
             domain_names=[app_domain_name],
             certificate=certificate,
             default_behavior=cloudfront.BehaviorOptions(
@@ -145,8 +113,9 @@ class HousePlannerCloudFrontStack(Stack):
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 cached_methods=cloudfront.CachedMethods.CACHE_GET_HEAD,
-                cache_policy=cache_policy,
-                origin_request_policy=origin_request_policy,
+                # Use managed policies for proper WebSocket support
+                cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER,
             ),
         )
 

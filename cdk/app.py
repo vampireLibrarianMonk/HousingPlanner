@@ -37,6 +37,13 @@ APP_DOMAIN_NAME = "app.housing-planner.com"
 
 app = cdk.App()
 
+# --------------------------------------------------
+# Context Variables (optional)
+# --------------------------------------------------
+# Pass via: cdk deploy -c ssh_cidr="1.2.3.4/32" -c cloudfront_pl_id="pl-xxxxxxxx"
+ssh_cidr = app.node.try_get_context("ssh_cidr")
+cloudfront_pl_id = app.node.try_get_context("cloudfront_pl_id")
+
 # Default environment for all stacks
 default_env = cdk.Environment(
     account=os.environ["CDK_DEFAULT_ACCOUNT"],
@@ -50,6 +57,8 @@ network_stack = HousePlannerNetworkStack(
     app,
     "HousePlannerNetworkStack",
     env=default_env,
+    ssh_cidr=ssh_cidr,
+    cloudfront_pl_id=cloudfront_pl_id,
     description="VPC, subnets, and security groups for House Planner",
 )
 

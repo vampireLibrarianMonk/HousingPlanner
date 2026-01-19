@@ -65,18 +65,26 @@ class HousePlannerCognitoStack(Stack):
             account_recovery=cognito.AccountRecovery.EMAIL_ONLY,
             user_invitation=cognito.UserInvitationConfig(
                 email_subject="Your House Planner account is ready",
+                # Use HTML for proper email formatting
                 email_body=(
-                    "Welcome to House Planner 👋\n"
-                    "--------------------------------\n"
-                    "Your account has been created.\n\n"
-                    "Activate your private workspace:\n"
-                    f"https://{app_domain_name}\n\n"
-                    "Sign in with:\n"
-                    "• Username: {username}\n"
-                    "• Temporary password: {####}\n\n"
-                    "You will be prompted to set a new password on first login.\n"
-                    "After that, your private workspace will be created automatically.\n\n"
-                    "— House Planner Team"
+                    "<html>"
+                    "<body style=\"font-family: Arial, sans-serif; color: #333; line-height: 1.6;\">"
+                    "<h2 style=\"color: #2563eb;\">Welcome to House Planner 👋</h2>"
+                    "<hr style=\"border: 1px solid #e5e7eb;\">"
+                    "<p>Your account has been created.</p>"
+                    "<h3>Activate your private workspace:</h3>"
+                    f"<p><a href=\"https://{app_domain_name}\" style=\"color: #2563eb;\">https://{app_domain_name}</a></p>"
+                    "<h3>Sign in with:</h3>"
+                    "<ul>"
+                    "<li><strong>Username:</strong> {username}</li>"
+                    "<li><strong>Temporary password:</strong> <code style=\"background: #f3f4f6; padding: 2px 6px;\">{####}</code></li>"
+                    "</ul>"
+                    "<p>You will be prompted to set a new password on first login.</p>"
+                    "<p>After that, your private workspace will be created automatically.</p>"
+                    "<br>"
+                    "<p style=\"color: #6b7280;\">— House Planner Team</p>"
+                    "</body>"
+                    "</html>"
                 ),
             ),
         )

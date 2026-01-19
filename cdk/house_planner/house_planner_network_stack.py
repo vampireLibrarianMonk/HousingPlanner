@@ -26,7 +26,19 @@ class HousePlannerNetworkStack(Stack):
     Creates VPC, subnets, and VPC endpoints required by other stacks.
     """
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        *,
+        ssh_cidr: str | None = None,
+        cloudfront_pl_id: str | None = None,
+        **kwargs,
+    ) -> None:
+        """
+        :param ssh_cidr: Optional CIDR for SSH access to EC2 instances (e.g., "1.2.3.4/32")
+        :param cloudfront_pl_id: Optional CloudFront prefix list ID for restricting ALB access
+        """
         super().__init__(scope, construct_id, **kwargs)
 
         # --------------------------------------------------
@@ -70,12 +82,21 @@ class HousePlannerNetworkStack(Stack):
             allow_all_outbound=True,
         )
 
-        # Allow HTTPS from anywhere (CloudFront will connect here)
-        self.alb_security_group.add_ingress_rule(
-            ec2.Peer.any_ipv4(),
-            ec2.Port.tcp(443),
-            "Allow HTTPS from CloudFront",
-        )
+        # Allow HTTPS from CloudFront
+        # If prefix list is provided, restrict to CloudFront IPs only (more secure)
+        # Otherwise allow from anywhere (less secure but works without prefix list)
+        if cloudfront_pl_id:
+            self.alb_security_group.add_ingress_rule(
+                ec2.Peer.prefix_list(cloudfront_pl_id),
+                ec2.Port.tcp(443),
+                "Allow HTTPS from CloudFront (prefix list)",
+            )
+        else:
+            self.alb_security_group.add_ingress_rule(
+                ec2.Peer.any_ipv4(),
+                ec2.Port.tcp(443),
+                "Allow HTTPS from CloudFront (any IPv4)",
+            )
 
         # --------------------------------------------------
         # Security Group: EC2 Instances
@@ -93,6 +114,23 @@ class HousePlannerNetworkStack(Stack):
             self.alb_security_group,
             ec2.Port.tcp(80),
             "Allow HTTP from ALB",
+        )
+
+        # Allow SSH from specified CIDR (optional - for debugging/admin access)
+        if ssh_cidr:
+            self.ec2_security_group.add_ingress_rule(
+                ec2.Peer.ipv4(ssh_cidr if "/" in ssh_cidr else f"{ssh_cidr}/32"),
+                ec2.Port.tcp(22),
+                f"Allow SSH from {ssh_cidr}",
+            )
+
+        # Allow SSH from EC2 Instance Connect for us-east-1
+        # This enables browser-based SSH via AWS Console
+        # See: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-connect-prerequisites.html
+        self.ec2_security_group.add_ingress_rule(
+            ec2.Peer.ipv4("18.206.107.24/29"),
+            ec2.Port.tcp(22),
+            "Allow SSH from EC2 Instance Connect (us-east-1)",
         )
 
         # --------------------------------------------------
