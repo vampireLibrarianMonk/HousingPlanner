@@ -14,6 +14,8 @@ ExecStartPre=/bin/bash -c 'cd /home/ec2-user/HousingPlanner && git pull --ff-onl
 # Fetch API keys from Secrets Manager
 ExecStartPre=/bin/bash -c 'export ORS_API_KEY=$(aws secretsmanager get-secret-value --secret-id houseplanner/ors_api_key --query SecretString --output text) && echo "ORS_API_KEY=$ORS_API_KEY" > /home/ec2-user/.streamlit_env'
 ExecStartPre=/bin/bash -c 'export GOOGLE_MAPS_API_KEY=$(aws secretsmanager get-secret-value --secret-id houseplanner/google_maps_api_key --query SecretString --output text) && echo "GOOGLE_MAPS_API_KEY=$GOOGLE_MAPS_API_KEY" >> /home/ec2-user/.streamlit_env'
+# Cognito logout config - these values are set by compute stack user data sed command
+ExecStartPre=/bin/bash -c 'echo "COGNITO_LOGOUT_URL=COGNITO_LOGOUT_URL_PLACEHOLDER" >> /home/ec2-user/.streamlit_env'
 ExecStart=/bin/bash -c 'source /home/ec2-user/.streamlit_env && source /home/ec2-user/HousingPlanner/.venv/bin/activate && exec streamlit run app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false --browser.serverPort=443 --browser.gatherUsageStats=false'
 Restart=always
 RestartSec=5

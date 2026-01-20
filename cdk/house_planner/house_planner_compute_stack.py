@@ -39,6 +39,8 @@ class HousePlannerComputeStack(Stack):
         vpc: ec2.IVpc,
         ec2_security_group: ec2.ISecurityGroup,
         user_pool_id: str,
+        user_pool_client_id: str,
+        user_pool_domain_name: str,
         app_domain_name: str,
         **kwargs,
     ) -> None:
@@ -46,6 +48,8 @@ class HousePlannerComputeStack(Stack):
         :param vpc: VPC for instance placement
         :param ec2_security_group: Security group for EC2 instances
         :param user_pool_id: Cognito user pool ID (for tagging)
+        :param user_pool_client_id: Cognito client ID (for logout URL)
+        :param user_pool_domain_name: Cognito domain prefix (for logout URL)
         :param app_domain_name: App domain for Streamlit config
         """
         super().__init__(scope, construct_id, **kwargs)
@@ -303,8 +307,9 @@ class HousePlannerComputeStack(Stack):
             "echo '[STREAMLIT] Installing Streamlit systemd service'",
             f"aws s3 cp {streamlit_service_asset.s3_object_url} /etc/systemd/system/streamlit.service",
             "",
-            "# Update the service file with the app domain",
+            "# Update the service file with the app domain and logout URL",
             f"sed -i 's/--browser.serverPort=443/--browser.serverAddress={app_domain_name} --browser.serverPort=443/' /etc/systemd/system/streamlit.service",
+            f"sed -i 's|COGNITO_LOGOUT_URL_PLACEHOLDER|https://{user_pool_domain_name}.auth.{self.region}.amazoncognito.com/logout?client_id={user_pool_client_id}\\&logout_uri=https://{app_domain_name}|' /etc/systemd/system/streamlit.service",
             "",
             "systemctl daemon-reload",
             "systemctl enable streamlit.service",

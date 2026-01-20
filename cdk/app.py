@@ -83,6 +83,8 @@ compute_stack = HousePlannerComputeStack(
     vpc=network_stack.vpc,
     ec2_security_group=network_stack.ec2_security_group,
     user_pool_id=cognito_stack.user_pool_id,
+    user_pool_client_id=cognito_stack.user_pool_client_id,
+    user_pool_domain_name=cognito_stack.user_pool_domain_name,
     app_domain_name=APP_DOMAIN_NAME,
     description="EC2 launch template and instance role for House Planner",
 )
