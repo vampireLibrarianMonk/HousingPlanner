@@ -1,164 +1,178 @@
-# Cognito-Authorization-Instructions.md
+# Follow-Up-Directions-01-Cognito.md
+## User Management & Authentication Troubleshooting
 
-This document describes the **final authentication and authorization model** for the HousePlanner deployment.
-It mirrors the structure and operational tone of `Deploy-Check.md` and is intended for **immediate operational use**.
+This document covers Cognito user management and authentication troubleshooting for House Planner.
 
----
-
-## 0. Authentication Model (Final)
-
-| Surface | Auth Mechanism | Enforcement Point |
-|------|---------------|-------------------|
-| Streamlit UI | Cognito Hosted UI (OIDC) | Application Load Balancer |
-| `/api/status` | Cognito User Pool | API Gateway Authorizer |
-| `/api/start` | Cognito + `admin` group | API Gateway + Lambda |
-
-Key rules:
-
-- CloudFront does **not** perform authentication.
-- Authentication for the UI happens **at the ALB**, before EC2.
-- Lambda@Edge is **not used for auth**.
-- No secrets are stored in CloudFront, Edge, or client code.
+**Related Files:**
+- `house_planner/house_planner_cognito_stack.py` - Cognito User Pool and Client
+- `house_planner/house_planner_load_balancer_stack.py` - ALB OIDC authentication
 
 ---
 
-## 1. Required Environment Variables
+## 1. Environment Variables
 
 ```bash
-export STACK_NAME="HousePlannerStack"
 export AWS_REGION="us-east-1"
+export COGNITO_USER_POOL_ID=$(aws cognito-idp list-user-pools --max-results 10 \
+  --query "UserPools[?Name=='HousePlannerUsers'].Id | [0]" --output text)
+echo "User Pool ID: $COGNITO_USER_POOL_ID"
 ```
 
 ---
 
-## 2. Export Cognito Identifiers (Programmatic)
+## 2. Authentication Flow
 
-### Cognito User Pool ID
-
-```bash
-export COGNITO_USER_POOL_ID=$(aws cloudformation list-stack-resources \
---region "$AWS_REGION" \
---stack-name "$STACK_NAME" \
---query "StackResourceSummaries[?ResourceType=='AWS::Cognito::UserPool'].PhysicalResourceId | [0]" \
---output text)
-```
-
----
-
-### Cognito User Pool Client ID
-
-```bash
-export COGNITO_USER_POOL_CLIENT_ID=$(aws cloudformation list-stack-resources \
---region "$AWS_REGION" \
---stack-name "$STACK_NAME" \
---query "StackResourceSummaries[?ResourceType=='AWS::Cognito::UserPoolClient'].PhysicalResourceId | [0]" \
---output text)
-```
+| Step | Component | What Happens |
+|------|-----------|--------------|
+| 1 | CloudFront | User accesses `app.housing-planner.com` |
+| 2 | ALB | OIDC authentication enforced |
+| 3 | Cognito | User redirected to Cognito Hosted UI |
+| 4 | User | Enters credentials, changes password if needed |
+| 5 | Cognito | Redirects back to `/oauth2/idpresponse` |
+| 6 | ALB | Validates tokens, sets session cookies |
+| 7 | ALB | Returns warm-up page (or routes to EC2) |
 
 ---
 
-### Cognito Hosted UI Domain Prefix
+## 3. User Management (Admin Only)
 
-```bash
-export COGNITO_DOMAIN_PREFIX=$(aws cloudformation list-stack-resources \
---region "$AWS_REGION" \
---stack-name "$STACK_NAME" \
---query "StackResourceSummaries[?ResourceType=='AWS::Cognito::UserPoolDomain'].PhysicalResourceId | [0]" \
---output text)
-```
-
----
-
-## 3. Export UI and API Endpoints
-
-### UI Base URL
-
-```bash
-export UI_BASE_URL=$(aws cloudformation describe-stacks \
-  --region "$AWS_REGION" \
-  --stack-name "$STACK_NAME" \
-  --query "Stacks[0].Outputs[?OutputKey=='StreamlitUiUrl'].OutputValue | [0]" \
-  --output text)
-```
-
----
-
-### Cognito Login URL (ALB Callback)
-
-```bash
-export COGNITO_LOGIN_URL="https://${COGNITO_DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognito.com/login?client_id=${COGNITO_USER_POOL_CLIENT_ID}&response_type=code&scope=openid+email&redirect_uri=${UI_BASE_URL}/oauth2/idpresponse"
-```
-
----
-
-## 4. User Management (Invite Only)
-
-### Create User
-
-Note: Using --message-action SUPPRESS creates the user silently with no email notification. Remove this flag to have Cognito send the default welcome email and temporary password. When suppressing email, a permanent password must be set manually.
+### Create User (Invite)
 
 ```bash
 aws cognito-idp admin-create-user \
   --region "$AWS_REGION" \
   --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --username USERNAME \
+  --username "user@example.com" \
   --user-attributes \
-    Name=email,Value=USERNAME \
-    Name=name,Value="Patrick Flanigan" \
-  --message-action SUPPRESS 
+    Name=email,Value="user@example.com" \
+    Name=name,Value="User Name"
 ```
 
-### Set Permanent Password
+User will receive email with temporary password.
+
+---
+
+### Set Permanent Password (Skip Email)
 
 ```bash
 aws cognito-idp admin-set-user-password \
   --region "$AWS_REGION" \
   --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --username USERNAME \
-  --password PASSWORD \
+  --username "user@example.com" \
+  --password "SecurePassword123!" \
   --permanent
 ```
 
 ---
 
-## 5. Admin Privileges
+### List Users
 
 ```bash
-aws cognito-idp admin-add-user-to-group \
---region "$AWS_REGION" \
---user-pool-id "$COGNITO_USER_POOL_ID" \
---username USERNAME \
---group-name admin
+aws cognito-idp list-users \
+  --region "$AWS_REGION" \
+  --user-pool-id "$COGNITO_USER_POOL_ID" \
+  --query "Users[*].{Username:Username,Status:UserStatus,Created:UserCreateDate}" \
+  --output table
 ```
 
 ---
 
-## 6. UI Auth Flow
+### Delete User
 
-1. User accesses the CloudFront URL
-2. ALB enforces Cognito OIDC authentication
-3. Cognito redirects to `/oauth2/idpresponse`
-4. ALB forwards authenticated traffic to EC2
+**⚠️ This triggers cleanup of EC2 instance and ALB resources via CloudTrail event.**
 
----
+```bash
+aws cognito-idp admin-delete-user \
+  --region "$AWS_REGION" \
+  --user-pool-id "$COGNITO_USER_POOL_ID" \
+  --username "user@example.com"
+```
 
-## 7. API Authorization
-
-All API requests require a Cognito access token.
-
----
-
-## 8. Failure Modes
-
-| Scenario | Result |
-|------|--------|
-| UI unauthenticated | Redirect to Cognito |
-| API unauthenticated | 401 |
-| API non-admin start | 403 |
-| Direct EC2 access | Blocked |
+See `Follow-Up-Directions-02-Lambda.md` for cleanup Lambda troubleshooting.
 
 ---
 
-## 9. Summary
+### Get User Details (including sub)
 
-This model provides secure, AWS-supported authentication without secrets at the edge.
+```bash
+aws cognito-idp admin-get-user \
+  --region "$AWS_REGION" \
+  --user-pool-id "$COGNITO_USER_POOL_ID" \
+  --username "user@example.com" \
+  --query "UserAttributes[?Name=='sub'].Value | [0]" \
+  --output text
+```
+
+---
+
+## 4. Troubleshooting Authentication
+
+### User Cannot Log In
+
+1. **Check user status:**
+   ```bash
+   aws cognito-idp admin-get-user \
+     --region "$AWS_REGION" \
+     --user-pool-id "$COGNITO_USER_POOL_ID" \
+     --username "user@example.com" \
+     --query "UserStatus" --output text
+   ```
+   
+   - `CONFIRMED` - User can log in
+   - `FORCE_CHANGE_PASSWORD` - User must change password on first login
+   - `UNCONFIRMED` - User hasn't verified email
+
+2. **Reset password:**
+   ```bash
+   aws cognito-idp admin-set-user-password \
+     --region "$AWS_REGION" \
+     --user-pool-id "$COGNITO_USER_POOL_ID" \
+     --username "user@example.com" \
+     --password "NewSecurePassword123!" \
+     --permanent
+   ```
+
+---
+
+### Cognito Callback URL Issues
+
+The callback URL must be registered in the User Pool Client:
+
+```bash
+aws cognito-idp describe-user-pool-client \
+  --region "$AWS_REGION" \
+  --user-pool-id "$COGNITO_USER_POOL_ID" \
+  --client-id $(aws cognito-idp list-user-pool-clients \
+    --user-pool-id "$COGNITO_USER_POOL_ID" \
+    --query "UserPoolClients[?ClientName=='HousePlannerALBClient'].ClientId | [0]" \
+    --output text) \
+  --query "UserPoolClient.CallbackURLs"
+```
+
+Expected: `["https://app.housing-planner.com/oauth2/idpresponse"]`
+
+---
+
+### Check ALB OIDC Configuration
+
+OIDC is configured in the ALB listener rules. Verify in AWS Console:
+1. EC2 → Load Balancers → HousePlannerALB
+2. Listeners → HTTPS:443 → View/edit rules
+3. Default action should show "authenticate-oidc" before "fixed-response"
+
+---
+
+## 5. Success Criteria
+
+- ✅ User receives invite email with temporary password
+- ✅ User can log in via Cognito Hosted UI
+- ✅ After authentication, user sees the warm-up page
+- ✅ User deletion triggers EC2 cleanup
+
+---
+
+## 6. Related Documentation
+
+- `Follow-Up-Directions-02-Lambda.md` - Lambda troubleshooting (ensure/delete)
+- `Follow-Up-Directions-03-EC2.md` - EC2 instance diagnostics
+- `Follow-Up-Directions-04-ALB.md` - ALB and routing issues
