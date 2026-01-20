@@ -15,8 +15,10 @@ def get_warmup_page_html() -> str:
     
     Note: ALB fixed response has a 1024 byte limit, so keep this compact.
     """
-    # Compact JS: ensure→cookie stored, then poll /health until ready, then reload
-    # This avoids the 502 during boot by waiting for EC2 to be healthy
+    # Compact JS with clear stage indicators:
+    # Stage 1: Provisioning (calling /internal/ensure)
+    # Stage 2: Waiting for health check
+    # Stage 3: Ready (refresh)
     return (
         "<!DOCTYPE html>"
         "<html>"
@@ -26,25 +28,25 @@ def get_warmup_page_html() -> str:
         "<style>"
         "body{font-family:sans-serif;display:flex;justify-content:center;"
         "align-items:center;height:100vh;margin:0;background:#667eea;color:#fff;text-align:center}"
+        "#g{font-size:.9em;opacity:.8}"
         "</style>"
         "</head>"
         "<body>"
         "<div>"
         "<h1>House Planner</h1>"
-        "<p id=s>Starting your workspace...</p>"
+        "<p id=s>[1/3] Provisioning...</p>"
+        "<p id=g></p>"
         "</div>"
         "<script>"
-        "var n=0,ok=0;"
+        "var n=0,S=document.getElementById('s'),G=document.getElementById('g');"
         "fetch('/internal/ensure',{credentials:'include'})"
-        ".then(function(r){if(r.ok)ok=1;return r.text()})"
-        ".then(function(t){poll(ok?'ok':'err:'+t.substring(0,15))})"
-        ".catch(function(e){poll('net:'+e)});"
-        "function poll(s){"
-        "n++;var m='Starting... ('+n*3+'s) '+s;"
-        "fetch('/health',{credentials:'include'})"
-        ".then(function(r){return r.text()})"
-        ".then(function(t){var x=t.trim();if(x=='OK')location.reload();else{document.getElementById('s').textContent=m+' ['+x.substring(0,15)+']';setTimeout(function(){poll(s)},3000)}})"
-        ".catch(function(e){document.getElementById('s').textContent=m+' err:'+e;setTimeout(function(){poll(s)},3000)})}"
+        ".then(r=>{if(!r.ok)throw'Lambda:'+r.status;S.textContent='[2/3] Waiting...';poll()})"
+        ".catch(e=>{S.textContent='[1/3] FAILED';G.textContent=e});"
+        "function poll(){"
+        "n++;G.textContent='Health check #'+n;"
+        "fetch('/health',{credentials:'include'}).then(r=>r.text())"
+        ".then(t=>{if(t.trim()=='OK'){S.textContent='[3/3] Ready!';location.reload()}else setTimeout(poll,3000)})"
+        ".catch(()=>setTimeout(poll,60000))}"
         "</script>"
         "</body>"
         "</html>"
@@ -73,7 +75,7 @@ def get_nginx_warmup_page_html() -> str:
         "<body>"
         "<div>"
         "<h1>House Planner</h1>"
-        "<p>Starting your workspace...</p>"
+        "<p>Starting your streamlit application...</p>"
         "<p>This page will refresh automatically.</p>"
         "</div>"
         "</body>"

@@ -8,10 +8,38 @@ This document covers troubleshooting for the two Lambda functions that manage us
 - `lambda/delete_instance.py` - Cleans up EC2 instances and ALB resources on user deletion
 - `house_planner/house_planner_load_balancer_stack.py` - Ensure Lambda configuration
 - `house_planner/house_planner_cleanup_stack.py` - Delete Lambda and EventBridge rule
+- `common.py` - Warm-up page HTML with status indicators
 
 ---
 
-## 1. Lambda Overview
+## 1. Warm-Up Page Status Legend
+
+The warm-up page shows clear stage indicators to help diagnose issues:
+
+| Status | Stage | What It Means | Action |
+|--------|-------|---------------|--------|
+| `[1/3] Provisioning...` | 1 | Calling `/internal/ensure` Lambda | Wait - Lambda is starting EC2 |
+| `[1/3] FAILED` | 1 | Lambda returned error | Check Lambda logs (see below) |
+| `Lambda:500` (below FAILED) | 1 | Lambda execution error | Check CloudWatch for errors |
+| `Lambda:401` (below FAILED) | 1 | OIDC authentication failed | Check ALB OIDC config |
+| `Lambda:504` (below FAILED) | 1 | Lambda timeout | Increase timeout, check EC2 |
+| `[2/3] Waiting...` | 2 | Lambda succeeded, waiting for EC2 | Wait - EC2 is booting |
+| `Health check #N` | 2 | Polling `/health` endpoint | Higher N = longer boot time |
+| `[3/3] Ready!` | 3 | Health check passed | Page will refresh automatically |
+
+### Troubleshooting by Stage
+
+**Stuck at [1/3] FAILED:**
+- Check Lambda logs: `aws logs tail /aws/lambda/HousePlannerEnsureInstance --follow`
+- Common causes: Lambda timeout, IAM permission errors, EC2 quota limits
+
+**Stuck at [2/3] with increasing health checks:**
+- EC2 is booting - wait for nginx/Streamlit to start (can take 2-3 minutes on first boot)
+- If stuck >5 minutes: SSH to EC2 and check services (see Follow-Up-03-EC2.md)
+
+---
+
+## 2. Lambda Overview
 
 | Lambda | Trigger | Purpose |
 |--------|---------|---------|
@@ -20,7 +48,7 @@ This document covers troubleshooting for the two Lambda functions that manage us
 
 ---
 
-## 2. View Lambda Logs
+## 3. View Lambda Logs
 
 ### Ensure Lambda Logs
 
@@ -47,7 +75,7 @@ aws logs tail /aws/lambda/HousePlannerDeleteUserResources --follow
 
 ---
 
-## 3. Ensure Lambda Troubleshooting
+## 4. Ensure Lambda Troubleshooting
 
 ### Common Errors
 
@@ -136,7 +164,7 @@ Expected: `{"Timeout": 120, "Memory": 256}`
 
 ---
 
-## 4. Delete Lambda Troubleshooting
+## 5. Delete Lambda Troubleshooting
 
 ### Verify EventBridge Rule
 
@@ -215,7 +243,7 @@ After deleting a user:
 
 ---
 
-## 5. Manual Cleanup (If Lambda Fails)
+## 6. Manual Cleanup (If Lambda Fails)
 
 If the delete Lambda fails, manually clean up:
 
@@ -236,7 +264,7 @@ aws ec2 terminate-instances --instance-ids INSTANCE_ID
 
 ---
 
-## 6. Success Criteria
+## 7. Success Criteria
 
 ### Ensure Lambda
 - ✅ Creates EC2 instance with correct tags
@@ -253,7 +281,7 @@ aws ec2 terminate-instances --instance-ids INSTANCE_ID
 
 ---
 
-## 7. Related Documentation
+## 8. Related Documentation
 
 - `Follow-Up-Directions-01-Cognito.md` - User management
 - `Follow-Up-Directions-03-EC2.md` - EC2 instance diagnostics
