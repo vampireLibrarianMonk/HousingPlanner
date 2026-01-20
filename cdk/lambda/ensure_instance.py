@@ -2,6 +2,7 @@ import boto3
 import os
 import hashlib
 import logging
+import time
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
@@ -116,6 +117,7 @@ def _get_or_create_target_group(tg_name: str, vpc_id: str) -> dict:
     # Create it if missing with fast health check settings.
     # Fast health checks: 5s interval, 2 healthy/unhealthy thresholds
     # This means ~10 seconds to become healthy (vs default ~2.5 minutes)
+    # Use /health endpoint which always returns 200 (even before Streamlit starts)
     resp = elbv2.create_target_group(
         Name=tg_name,
         Protocol="HTTP",
@@ -123,7 +125,7 @@ def _get_or_create_target_group(tg_name: str, vpc_id: str) -> dict:
         VpcId=vpc_id,
         TargetType="instance",
         HealthCheckProtocol="HTTP",
-        HealthCheckPath="/",
+        HealthCheckPath="/health",
         HealthCheckIntervalSeconds=5,
         HealthCheckTimeoutSeconds=3,
         HealthyThresholdCount=2,
@@ -304,17 +306,32 @@ def lambda_handler(event, context):
         state = inst["State"]["Name"]
         logger.info("Found instance %s state=%s for user_sub", instance_id, state)
 
-        # Register target (safe to call repeatedly)
+        # If stopped, start the instance
+        if state == "stopped":
+            ec2.start_instances(InstanceIds=[instance_id])
+            logger.info("Starting stopped instance %s", instance_id)
+
+        # Wait for running state if not already running (ALB requires running state)
+        if state != "running":
+            logger.info("Waiting for instance %s to reach running state...", instance_id)
+            for i in range(60):
+                resp = ec2.describe_instances(InstanceIds=[instance_id])
+                current_state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
+                if current_state == "running":
+                    logger.info("Instance %s now running after %ds", instance_id, i+1)
+                    break
+                if i % 5 == 0:
+                    logger.info("Instance %s state=%s, waiting... (%d/60)", instance_id, current_state, i+1)
+                time.sleep(1)
+            else:
+                logger.warning("Instance %s did not reach running in 60s, state=%s", instance_id, current_state)
+
         elbv2.register_targets(
             TargetGroupArn=tg["TargetGroupArn"],
             Targets=[{"Id": instance_id, "Port": 80}],
         )
 
         _ensure_rule(listener_arn, user_sub, tg["TargetGroupArn"])
-
-        if state == "stopped":
-            ec2.start_instances(InstanceIds=[instance_id])
-            logger.info("Starting stopped instance %s", instance_id)
 
         # Return with Set-Cookie header so browser stores the routing cookie
         return _alb_response(200, "OK", {"set-cookie": set_cookie})
@@ -342,6 +359,21 @@ def lambda_handler(event, context):
 
     instance_id = run["Instances"][0]["InstanceId"]
     logger.info("Created new instance %s for user_sub", instance_id)
+
+    # Wait for instance to be in RUNNING state before registering
+    # ALB requires instances to be "running" (not just "pending") to register
+    logger.info("Waiting for instance %s to reach running state...", instance_id)
+    for i in range(60):  # Wait up to 60 seconds
+        resp = ec2.describe_instances(InstanceIds=[instance_id])
+        current_state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
+        if current_state == "running":
+            logger.info("Instance %s now running after %ds, registering with target group", instance_id, i+1)
+            break
+        if i % 5 == 0:  # Log every 5 seconds to reduce noise
+            logger.info("Instance %s state=%s, waiting... (%d/60)", instance_id, current_state, i+1)
+        time.sleep(1)
+    else:
+        logger.warning("Instance %s did not reach running state in 60s, current state=%s", instance_id, current_state)
 
     # Register target + ensure rule
     elbv2.register_targets(

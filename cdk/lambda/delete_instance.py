@@ -52,15 +52,28 @@ def _resolve_to_sub(event: dict) -> str:
     Extract the user's 'sub' (unique identifier) from the event.
     
     Handles:
-    - EventBridge CloudTrail AdminDeleteUser events (username in requestParameters)
+    - EventBridge CloudTrail AdminDeleteUser events (sub in additionalEventData)
     - Cognito PRE_DELETE trigger events (sub in userAttributes)
+    
+    Note: CloudTrail events mask the username as 'HIDDEN_DUE_TO_SECURITY_REASONS'
+    but provide the actual sub in additionalEventData.sub
     """
-    # 1) EventBridge CloudTrail AdminDeleteUser (username/email)
     detail = event.get("detail", {})
+    
+    # 1) BEST: Get sub directly from CloudTrail additionalEventData
+    # This is the most reliable source - CloudTrail includes the actual sub here
+    # even when username is masked for security
+    additional_data = detail.get("additionalEventData", {}) or {}
+    if additional_data.get("sub"):
+        user_sub = additional_data["sub"]
+        logger.info("Resolved sub from additionalEventData: %s", user_sub)
+        return user_sub
+    
+    # 2) FALLBACK: Try to look up from username (if not masked)
     rp = detail.get("requestParameters", {}) or {}
     username = rp.get("username")
     
-    if username:
+    if username and username != "HIDDEN_DUE_TO_SECURITY_REASONS":
         try:
             resp = cognito.admin_get_user(
                 UserPoolId=os.environ["USER_POOL_ID"],
@@ -73,15 +86,18 @@ def _resolve_to_sub(event: dict) -> str:
                 return user_sub
             return username
         except cognito.exceptions.UserNotFoundException:
-            # User already deleted, try to use username as-is
-            logger.warning("User %s not found in Cognito, using as identifier", username)
-            return username
+            logger.warning("User %s not found in Cognito", username)
+        except Exception as e:
+            logger.warning("Error looking up user %s: %s", username, e)
 
-    # 2) Cognito PRE_DELETE trigger
+    # 3) Cognito PRE_DELETE trigger format
     attrs = event.get("request", {}).get("userAttributes", {}) or {}
     user_sub = attrs.get("sub") or event.get("userName")
-    logger.info("Resolved user_sub from trigger: %s", user_sub)
-    return user_sub
+    if user_sub:
+        logger.info("Resolved user_sub from trigger: %s", user_sub)
+        return user_sub
+    
+    return None
 
 
 def _tg_name(user_sub: str, listener_arn: str) -> str:
