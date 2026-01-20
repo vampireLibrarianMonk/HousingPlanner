@@ -29,6 +29,8 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+from common import get_warmup_page_html
+
 
 class HousePlannerLoadBalancerStack(Stack):
     """
@@ -111,7 +113,7 @@ class HousePlannerLoadBalancerStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_12,
             handler="ensure_instance.lambda_handler",
             code=_lambda.Code.from_asset("lambda"),
-            timeout=Duration.seconds(60),
+            timeout=Duration.seconds(120),
             memory_size=256,
             description="Provisions or starts EC2 instance for authenticated user",
             environment={
@@ -154,6 +156,7 @@ class HousePlannerLoadBalancerStack(Stack):
                     "elasticloadbalancing:DescribeTargetHealth",
                     "elasticloadbalancing:CreateTargetGroup",
                     "elasticloadbalancing:DeleteTargetGroup",
+                    "elasticloadbalancing:ModifyTargetGroupAttributes",
                     "elasticloadbalancing:RegisterTargets",
                     "elasticloadbalancing:DeregisterTargets",
                     "elasticloadbalancing:CreateRule",
@@ -257,31 +260,6 @@ class HousePlannerLoadBalancerStack(Stack):
     def _warm_up_page(self) -> str:
         """
         Returns the HTML for the warm-up page.
-        This page is shown immediately after authentication.
-        It triggers the /internal/ensure endpoint to provision the user's EC2 instance.
-        
-        Note: ALB fixed response has a 1024 byte limit and must be valid XML/HTML.
-        Avoid special characters like emojis.
+        Uses the shared function from common.py for consistency.
         """
-        return (
-            "<html>"
-            "<head>"
-            "<title>House Planner</title>"
-            "<meta http-equiv=\"refresh\" content=\"5\">"
-            "<style>"
-            "body{font-family:sans-serif;display:flex;justify-content:center;"
-            "align-items:center;height:100vh;margin:0;background:#667eea;color:#fff;text-align:center}"
-            "</style>"
-            "</head>"
-            "<body>"
-            "<div>"
-            "<h1>House Planner</h1>"
-            "<p>Starting your workspace...</p>"
-            "<p>This page will refresh automatically.</p>"
-            "</div>"
-            "<script>"
-            "fetch('/internal/ensure',{method:'POST',credentials:'include'}).catch(function(){});"
-            "</script>"
-            "</body>"
-            "</html>"
-        )
+        return get_warmup_page_html()
