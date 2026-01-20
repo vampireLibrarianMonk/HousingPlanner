@@ -283,6 +283,7 @@ class HousePlannerComputeStack(Stack):
             "echo '[STREAMLIT] Cloning repository...' && ",
             "git clone https://github.com/vampireLibrarianMonk/HousingPlanner.git || true && ",
             "cd HousingPlanner && ",
+            "git checkout logout-functionality && "
             "git fetch && ",
             "echo '[STREAMLIT] Repository ready' && ",
             "",

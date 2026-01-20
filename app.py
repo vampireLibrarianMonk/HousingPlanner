@@ -7,12 +7,17 @@ init_state()
 # =============================
 # Third-party: Core app & data
 # =============================
+import os
 import streamlit as st
 
 # -----------------------------
 # Streamlit UI
 # -----------------------------
 st.set_page_config(page_title="House Planner (Prototype)", layout="wide")
+
+# Logout button in sidebar
+if logout_url := os.environ.get("COGNITO_LOGOUT_URL"):
+    st.sidebar.link_button("🚪 Logout", logout_url)
 
 st.title("House Planner (Prototype)")
 
