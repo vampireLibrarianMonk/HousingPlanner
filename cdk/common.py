@@ -11,14 +11,16 @@ def get_warmup_page_html() -> str:
     
     This page is shown by ALB default action after OIDC auth.
     It triggers the /internal/ensure endpoint, waits for response (sets routing cookie),
-    then polls /health every 3s until the instance is ready, then refreshes.
+    then polls /health until the instance is ready, then refreshes.
     
     Note: ALB fixed response has a 1024 byte limit, so keep this compact.
+    
+    Steps displayed:
+    1. Starting Lambda - calling /internal/ensure
+    2. Creating workspace - Lambda creating/starting EC2
+    3. Booting instance - waiting for health check
+    4. Ready - redirecting to app
     """
-    # Compact JS with clear stage indicators:
-    # Stage 1: Provisioning (calling /internal/ensure)
-    # Stage 2: Waiting for health check
-    # Stage 3: Ready (refresh)
     return (
         "<!DOCTYPE html>"
         "<html>"
@@ -28,25 +30,25 @@ def get_warmup_page_html() -> str:
         "<style>"
         "body{font-family:sans-serif;display:flex;justify-content:center;"
         "align-items:center;height:100vh;margin:0;background:#667eea;color:#fff;text-align:center}"
-        "#g{font-size:.9em;opacity:.8}"
         "</style>"
         "</head>"
         "<body>"
         "<div>"
         "<h1>House Planner</h1>"
-        "<p id=s>[1/3] Provisioning...</p>"
-        "<p id=g></p>"
+        "<p id=s>Step 1/4: Starting Lambda</p>"
         "</div>"
         "<script>"
-        "var n=0,S=document.getElementById('s'),G=document.getElementById('g');"
+        "var S=document.getElementById('s');"
         "fetch('/internal/ensure',{credentials:'include'})"
-        ".then(r=>{if(!r.ok)throw'Lambda:'+r.status;S.textContent='[2/3] Waiting...';poll()})"
-        ".catch(e=>{S.textContent='[1/3] FAILED';G.textContent=e});"
+        ".then(r=>{if(!r.ok)throw'Error:'+r.status;return new Promise(x=>setTimeout(()=>x(r),1000))})"
+        ".then(r=>{S.textContent='Step 2/4: Creating workspace';return r.text()})"
+        ".then(()=>new Promise(x=>setTimeout(x,1000)))"
+        ".then(()=>{S.textContent='Step 3/4: Booting instance';poll()})"
+        ".catch(e=>{S.textContent='FAILED - '+e});"
         "function poll(){"
-        "n++;G.textContent='Health check #'+n;"
         "fetch('/health',{credentials:'include'}).then(r=>r.text())"
-        ".then(t=>{if(t.trim()=='OK'){S.textContent='[3/3] Ready!';location.reload()}else setTimeout(poll,3000)})"
-        ".catch(()=>setTimeout(poll,60000))}"
+        ".then(t=>{if(t.trim()=='OK'){S.textContent='Step 4/4: Ready!';setTimeout(()=>location.reload(),1000)}else setTimeout(poll,30000)})"
+        ".catch(()=>setTimeout(poll,30000))}"
         "</script>"
         "</body>"
         "</html>"
