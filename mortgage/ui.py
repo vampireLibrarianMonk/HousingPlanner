@@ -465,85 +465,6 @@ def render_mortgage(method: str):
             # (Visible only after Calculate)
             # -----------------------------
             if st.session_state.get("chart_visible", False):
-
-                # ---- Extra Payment Controls STATE (safe defaults) ----
-                extra_payment_amount = st.session_state.get("extra_payment_amount", 0.0)
-                extra_payment_freq = st.session_state.get("extra_payment_freq", 1)
-
-                if "use_extra_payments" not in st.session_state:
-                    st.session_state["use_extra_payments"] = False
-
-                if st.session_state.get("redo_chart", False):
-                    st.session_state["use_extra_payments"] = True
-
-                # ---- Select amortization for chart ----
-                if (
-                        st.session_state.get("use_extra_payments", False)
-                        and extra_payment_amount > 0
-                ):
-                    amortization_df = amortization_schedule_with_extra(
-                        loan_amount,
-                        inputs.annual_interest_rate_pct,
-                        inputs.loan_term_years,
-                        pi,
-                        extra_payment_annual=extra_payment_amount * extra_payment_freq,
-                    )
-                else:
-                    amortization_df = amortization_schedule(
-                        loan_amount,
-                        inputs.annual_interest_rate_pct,
-                        inputs.loan_term_years,
-                        pi
-                    )
-
-                years = amortization_df.index + 1
-                interest_cumulative = amortization_df["Interest"].cumsum()
-                balance = amortization_df["Ending Balance"]
-                annual_payment = amortization_df["Interest"] + amortization_df["Principal"]
-
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.plot(years, balance, label="Remaining Balance", linewidth=2)
-                ax.plot(years, interest_cumulative, label="Cumulative Interest", linewidth=2)
-                ax.plot(years, annual_payment, label="Annual Payment", linewidth=2, linestyle="--")
-
-                ax.set_title("Mortgage Amortization Over Time")
-                ax.set_xlabel("Year")
-                ax.set_ylabel("Dollars")
-                ax.grid(True, linestyle="--", alpha=0.6)
-                ax.legend()
-
-                st.pyplot(fig)
-
-                controls_row = st.columns([1, 2, 2, 2, 1], gap="small")
-
-                with controls_row[1]:
-                    st.number_input(
-                        "Extra Payment ($)",
-                        min_value=0.0,
-                        step=100.0,
-                        key="extra_payment_amount",
-                        label_visibility="collapsed",
-                    )
-                    st.caption("Extra Payment ($)")
-
-                with controls_row[2]:
-                    st.number_input(
-                        "Times / Year",
-                        min_value=1,
-                        step=1,
-                        key="extra_payment_freq",
-                        label_visibility="collapsed",
-                    )
-                    st.caption("Times / Year")
-
-                with controls_row[3]:
-                    st.button(
-                        "Redo Chart",
-                        key="redo_chart",
-                        use_container_width=True
-                    )
-
-            if st.session_state.get("chart_visible", False):
                 # ---- Normalize Take Home (monthly) ----
                 take_home_monthly = 0.0
                 if not st.session_state.get("take_home_sources_df", pd.DataFrame()).empty:
@@ -618,79 +539,198 @@ def render_mortgage(method: str):
 
                 banner_text = "  |  ".join(banner_parts)
 
-                if include_take_home:
-                    affordability_sentence = (
-                        "✅ This purchase is affordable for you."
-                        if is_affordable
-                        else "⚠️ This purchase exceeds your take-home pay."
-                    )
-                    st.markdown(f"**{affordability_sentence}**")
-
-                st.markdown(
-                    f"""
-                    <div style="
-                        padding: 14px;
-                        border-radius: 6px;
-                        background: {payment_color};
-                        color: white;
-                        font-size: 22px;
-                        font-weight: 700;
-                    ">
-                        {banner_text}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-                # Update badge once
-                st.session_state["mortgage_badge"] = f"Monthly: ${monthly_total:,.0f}"
-
-                # ---- Summary ----
-                st.markdown("### Summary")
+                tax_cost_monthly = monthly_tax + monthly_ins + monthly_hoa + monthly_pmi + monthly_other
                 payoff = payoff_date(
                     inputs.start_year,
                     inputs.start_month,
                     inputs.loan_term_years
                 )
 
-                tax_cost_monthly = monthly_tax + monthly_ins + monthly_hoa + monthly_pmi + monthly_other
+                # Store all data for display outside expander
+                st.session_state["_mortgage_banner"] = {
+                    "include_take_home": include_take_home,
+                    "is_affordable": is_affordable,
+                    "banner_text": banner_text,
+                    "payment_color": payment_color,
+                    "monthly_total": monthly_total,
+                }
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.metric("House Price", f"${home_price:,.2f}")
-                    st.metric("Loan Amount", f"${loan_amount:,.2f}")
-                    st.metric("Down Payment", f"${down_payment_amt:,.2f}")
-                    st.metric("Total of Mortgage Payments (P&I)", f"${total_pi_paid:,.2f}")
-                    st.metric("Total Interest", f"${total_interest:,.2f}")
-                    st.metric("Mortgage Payoff Date", payoff)
-                with c2:
-                    st.metric(
-                        "Mortgage (Monthly)",
-                        f"${pi:,.0f}",
-                        help="Principal & Interest only"
-                    )
-                    st.metric(
-                        "Tax & Cost (Monthly)",
-                        f"${tax_cost_monthly:,.0f}",
-                        help="Property tax, insurance, HOA, PMI, other (monthly normalized)"
-                    )
-                    st.metric(
-                        "Household Expenses (Monthly)",
-                        f"${household_monthly:,.0f}",
-                        help="Daycare, groceries, utilities, car"
-                    )
-                    st.metric(
-                        "Vehicle Expenses (Monthly)",
-                        f"${vehicle_monthly:,.0f}",
-                        help="Car tax (annual) + Gasoline (weekly) + Maintenance (annual) + Insurance (monthly)"
-                    )
-                    st.metric(
-                        "College Savings (Monthly)",
-                        f"${college_monthly:,.0f}",
-                        help="529 contribution per child × number of kids (annual → monthly)"
-                    )
-                    st.metric(
-                        "Additional Expenses (Monthly)",
-                        f"${custom_monthly:,.0f}",
-                        help="User-defined expenses (monthly + annual normalized)"
-                    )
+                st.session_state["_mortgage_summary"] = {
+                    "home_price": home_price,
+                    "loan_amount": loan_amount,
+                    "down_payment_amt": down_payment_amt,
+                    "total_pi_paid": total_pi_paid,
+                    "total_interest": total_interest,
+                    "payoff": payoff,
+                    "pi": pi,
+                    "tax_cost_monthly": tax_cost_monthly,
+                    "household_monthly": household_monthly,
+                    "vehicle_monthly": vehicle_monthly,
+                    "college_monthly": college_monthly,
+                    "custom_monthly": custom_monthly,
+                }
+
+                st.session_state["_mortgage_chart"] = {
+                    "loan_amount": loan_amount,
+                    "annual_rate": inputs.annual_interest_rate_pct,
+                    "loan_term_years": inputs.loan_term_years,
+                    "pi": pi,
+                }
+
+    # ---- Display chart OUTSIDE expander ----
+    if "_mortgage_chart" in st.session_state and st.session_state.get("chart_visible", False):
+        chart_data = st.session_state["_mortgage_chart"]
+        
+        # ---- Extra Payment Controls STATE ----
+        extra_payment_amount = st.session_state.get("extra_payment_amount", 0.0)
+        extra_payment_freq = st.session_state.get("extra_payment_freq", 1)
+
+        if "use_extra_payments" not in st.session_state:
+            st.session_state["use_extra_payments"] = False
+
+        if st.session_state.get("redo_chart", False):
+            st.session_state["use_extra_payments"] = True
+
+        # ---- Select amortization for chart ----
+        if (
+                st.session_state.get("use_extra_payments", False)
+                and extra_payment_amount > 0
+        ):
+            amortization_df = amortization_schedule_with_extra(
+                chart_data["loan_amount"],
+                chart_data["annual_rate"],
+                chart_data["loan_term_years"],
+                chart_data["pi"],
+                extra_payment_annual=extra_payment_amount * extra_payment_freq,
+            )
+        else:
+            amortization_df = amortization_schedule(
+                chart_data["loan_amount"],
+                chart_data["annual_rate"],
+                chart_data["loan_term_years"],
+                chart_data["pi"]
+            )
+
+        years = amortization_df.index + 1
+        interest_cumulative = amortization_df["Interest"].cumsum()
+        balance = amortization_df["Ending Balance"]
+        annual_payment = amortization_df["Interest"] + amortization_df["Principal"]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(years, balance, label="Remaining Balance", linewidth=2)
+        ax.plot(years, interest_cumulative, label="Cumulative Interest", linewidth=2)
+        ax.plot(years, annual_payment, label="Annual Payment", linewidth=2, linestyle="--")
+
+        ax.set_title("Mortgage Amortization Over Time")
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Dollars")
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.legend()
+
+        st.pyplot(fig)
+
+        controls_row = st.columns([1, 2, 2, 2, 1], gap="small")
+
+        with controls_row[1]:
+            st.number_input(
+                "Extra Payment ($)",
+                min_value=0.0,
+                step=100.0,
+                key="extra_payment_amount",
+                label_visibility="collapsed",
+            )
+            st.caption("Extra Payment ($)")
+
+        with controls_row[2]:
+            st.number_input(
+                "Times / Year",
+                min_value=1,
+                step=1,
+                key="extra_payment_freq",
+                label_visibility="collapsed",
+            )
+            st.caption("Times / Year")
+
+        with controls_row[3]:
+            st.button(
+                "Redo Chart",
+                key="redo_chart",
+                use_container_width=True
+            )
+
+    # ---- Display banner OUTSIDE expander (below the Mortgage section) ----
+    if "_mortgage_banner" in st.session_state:
+        banner = st.session_state["_mortgage_banner"]
+
+        if banner["include_take_home"]:
+            affordability_sentence = (
+                "✅ This purchase is affordable for you."
+                if banner["is_affordable"]
+                else "⚠️ This purchase exceeds your take-home pay."
+            )
+            st.markdown(f"**{affordability_sentence}**")
+
+        st.markdown(
+            f"""
+            <div style="
+                padding: 14px;
+                border-radius: 6px;
+                background: {banner['payment_color']};
+                color: white;
+                font-size: 22px;
+                font-weight: 700;
+            ">
+                {banner['banner_text']}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # Update badge
+        st.session_state["mortgage_badge"] = f"Monthly: ${banner['monthly_total']:,.0f}"
+
+    # ---- Display summary OUTSIDE expander ----
+    if "_mortgage_summary" in st.session_state and st.session_state.get("chart_visible", False):
+        summary = st.session_state["_mortgage_summary"]
+        
+        st.markdown("### Summary")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("House Price", f"${summary['home_price']:,.2f}")
+            st.metric("Loan Amount", f"${summary['loan_amount']:,.2f}")
+            st.metric("Down Payment", f"${summary['down_payment_amt']:,.2f}")
+            st.metric("Total of Mortgage Payments (P&I)", f"${summary['total_pi_paid']:,.2f}")
+            st.metric("Total Interest", f"${summary['total_interest']:,.2f}")
+            st.metric("Mortgage Payoff Date", summary['payoff'])
+        with c2:
+            st.metric(
+                "Mortgage (Monthly)",
+                f"${summary['pi']:,.0f}",
+                help="Principal & Interest only"
+            )
+            st.metric(
+                "Tax & Cost (Monthly)",
+                f"${summary['tax_cost_monthly']:,.0f}",
+                help="Property tax, insurance, HOA, PMI, other (monthly normalized)"
+            )
+            st.metric(
+                "Household Expenses (Monthly)",
+                f"${summary['household_monthly']:,.0f}",
+                help="Daycare, groceries, utilities, car"
+            )
+            st.metric(
+                "Vehicle Expenses (Monthly)",
+                f"${summary['vehicle_monthly']:,.0f}",
+                help="Car tax (annual) + Gasoline (weekly) + Maintenance (annual) + Insurance (monthly)"
+            )
+            st.metric(
+                "College Savings (Monthly)",
+                f"${summary['college_monthly']:,.0f}",
+                help="529 contribution per child × number of kids (annual → monthly)"
+            )
+            st.metric(
+                "Additional Expenses (Monthly)",
+                f"${summary['custom_monthly']:,.0f}",
+                help="User-defined expenses (monthly + annual normalized)"
+            )

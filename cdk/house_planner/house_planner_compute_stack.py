@@ -39,6 +39,8 @@ class HousePlannerComputeStack(Stack):
         vpc: ec2.IVpc,
         ec2_security_group: ec2.ISecurityGroup,
         user_pool_id: str,
+        user_pool_client_id: str,
+        user_pool_domain_name: str,
         app_domain_name: str,
         **kwargs,
     ) -> None:
@@ -46,6 +48,8 @@ class HousePlannerComputeStack(Stack):
         :param vpc: VPC for instance placement
         :param ec2_security_group: Security group for EC2 instances
         :param user_pool_id: Cognito user pool ID (for tagging)
+        :param user_pool_client_id: Cognito client ID (for logout URL)
+        :param user_pool_domain_name: Cognito domain prefix (for logout URL)
         :param app_domain_name: App domain for Streamlit config
         """
         super().__init__(scope, construct_id, **kwargs)
@@ -228,6 +232,16 @@ class HousePlannerComputeStack(Stack):
             "        add_header Content-Type text/plain;",
             "    }",
             "",
+            "    # Logout endpoint - clears ALB session cookies and redirects to Cognito logout",
+            "    # The actual logout URL is injected by sed during bootstrap",
+            "    location = /logout {",
+            "        # Clear ALB OIDC session cookies (they're numbered 0, 1, 2, etc.)",
+            "        add_header Set-Cookie 'AWSELBAuthSessionCookie-0=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure' always;",
+            "        add_header Set-Cookie 'AWSELBAuthSessionCookie-1=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure' always;",
+            "        # Redirect to Cognito logout - placeholder replaced by sed",
+            "        return 302 COGNITO_LOGOUT_REDIRECT_PLACEHOLDER;",
+            "    }",
+            "",
             "    # Serve startup page on backend errors - use =200 to return 200 status",
             "    # This keeps ALB health checks passing while Streamlit starts up",
             "    error_page 502 503 504 =200 /starting.html;",
@@ -250,6 +264,10 @@ class HousePlannerComputeStack(Stack):
             "    }",
             "}",
             "EOF",
+            "",
+            "# Replace logout redirect placeholder with actual Cognito URL",
+            "# logout_uri goes to app root (not /logout) to avoid infinite loop",
+            f"sed -i 's|COGNITO_LOGOUT_REDIRECT_PLACEHOLDER|https://{user_pool_domain_name}.auth.{self.region}.amazoncognito.com/logout?client_id={user_pool_client_id}\\&logout_uri=https://{app_domain_name}|' /etc/nginx/conf.d/streamlit.conf",
             "",
             "# Validate and start nginx with our config (not the default welcome page)",
             "nginx -t || (echo '[FATAL] nginx config invalid' && exit 1)",
@@ -279,6 +297,7 @@ class HousePlannerComputeStack(Stack):
             "echo '[STREAMLIT] Cloning repository...' && ",
             "git clone https://github.com/vampireLibrarianMonk/HousingPlanner.git || true && ",
             "cd HousingPlanner && ",
+            "git checkout logout-functionality && "
             "git fetch && ",
             "echo '[STREAMLIT] Repository ready' && ",
             "",
