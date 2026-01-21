@@ -1,0 +1,112 @@
+@startuml House Planner AWS Architecture (High-Level)
+
+' ===== Layout / readability =====
+left to right direction
+skinparam linetype ortho
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam ArrowThickness 1
+skinparam DefaultFontSize 14
+skinparam wrapWidth 220
+hide stereotype
+
+' ===== AWS Icons =====
+!define AWSPuml ./aws-icons-for-plantuml/dist
+
+!include AWSPuml/AWSCommon.puml
+!include AWSPuml/AWSSimplified.puml
+
+!include AWSPuml/NetworkingContentDelivery/Route53.puml
+!include AWSPuml/NetworkingContentDelivery/CloudFront.puml
+!include AWSPuml/NetworkingContentDelivery/ElasticLoadBalancing.puml
+!include AWSPuml/NetworkingContentDelivery/VirtualPrivateCloud.puml
+
+!include AWSPuml/SecurityIdentityCompliance/CertificateManager.puml
+!include AWSPuml/SecurityIdentityCompliance/Cognito.puml
+!include AWSPuml/SecurityIdentityCompliance/SecretsManager.puml
+!include AWSPuml/SecurityIdentityCompliance/IdentityandAccessManagement.puml
+
+!include AWSPuml/Compute/Lambda.puml
+!include AWSPuml/Compute/EC2.puml
+
+!include AWSPuml/Storage/SimpleStorageService.puml
+!include AWSPuml/ManagementGovernance/CloudTrail.puml
+!include AWSPuml/ApplicationIntegration/EventBridge.puml
+
+title House Planner - AWS Architecture (High-Level)
+
+actor "User" as user
+
+' ===== Grouping: keep icons close & reduce crossings =====
+together {
+  rectangle "Edge" as edge {
+    Route53(dns, "Route53", "app.housing-planner.com")
+    CloudFront(cf, "CloudFront", "CDN / TLS edge")
+    CertificateManager(acm, "ACM", "us-east-1 cert")
+  }
+
+  rectangle "Auth" as auth {
+    Cognito(cognito, "Cognito User Pool", "OIDC IdP")
+  }
+
+  rectangle "Routing / Origin" as routing {
+    ElasticLoadBalancing(alb, "Application Load Balancer", "OIDC + routing")
+  }
+}
+
+together {
+  rectangle "Control Plane" as control {
+    Lambda(ensureLambda, "ensure_instance", "Provision / route")
+    Lambda(deleteLambda, "delete_instance", "Cleanup")
+    CloudTrail(cloudtrail, "CloudTrail", "Audit events")
+    EventBridge(eventbridge, "EventBridge Rule", "AdminDeleteUser")
+  }
+
+  rectangle "Data Plane" as data {
+    VirtualPrivateCloud(vpc, "VPC", "us-east-1")
+    EC2(ec2, "EC2 Workspace", "per-user instance")
+  }
+
+  rectangle "Supporting Services" as support {
+    SecretsManager(secrets, "Secrets Manager", "client / app secrets")
+    IdentityandAccessManagement(iam, "IAM", "roles / policies")
+    SimpleStorageService(s3, "S3", "CDK assets / bootstrap")
+  }
+}
+
+' ===== Runtime (solid): request path =====
+user --> dns : HTTPS
+dns --> cf : DNS -> CDN
+cf --> alb : Origin
+alb --> cognito : OIDC auth
+alb --> ensureLambda : /internal/ensure
+ensureLambda --> ec2 : ensure workspace
+alb --> ec2 : route user session
+
+' ===== Lifecycle (dashed): provisioning + cleanup =====
+ensureLambda ..> alb : manage rules/TGs
+ensureLambda ..> iam : assume role
+ensureLambda ..> secrets : read secrets
+ec2 ..> iam : instance role
+ec2 ..> s3 : bootstrap assets
+
+cognito ..> cloudtrail : AdminDeleteUser event
+cloudtrail ..> eventbridge : match rule
+eventbridge ..> deleteLambda : invoke
+deleteLambda ..> ec2 : terminate
+deleteLambda ..> alb : remove rules/TGs
+deleteLambda ..> iam : assume role
+
+' ===== Legend: details moved off edges =====
+legend right
+**Line semantics**
+- Solid: runtime request / routing
+- Dashed: automation / control-plane actions
+
+**High-level responsibilities**
+- ALB: OIDC gate + session routing
+- ensure_instance: provision or reattach per-user workspace
+- delete_instance: cleanup on user deletion
+endlegend
+
+@enduml
