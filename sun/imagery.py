@@ -6,7 +6,7 @@ import streamlit as st
 
 
 @st.cache_data(show_spinner=False, ttl=86400)
-def get_static_osm_image(lat, lon, zoom=19, size=800):
+def get_static_osm_image(lat, lon, zoom=19, size=800, cache_buster=None):
     tile_size = 256
     half = size // 2
 

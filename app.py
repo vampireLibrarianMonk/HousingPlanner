@@ -14,6 +14,7 @@ import streamlit as st
 # -----------------------------
 st.set_page_config(page_title="House Planner (Prototype)", layout="wide")
 
+
 # Logout button in sidebar - uses JavaScript to navigate top window (avoids iframe issues)
 st.sidebar.markdown(
     '''<a href="/logout" onclick="window.top.location.href='/logout';return false;" 
@@ -38,13 +39,7 @@ from mortgage.ui import render_mortgage
 if "mortgage_badge" not in st.session_state:
     st.session_state["mortgage_badge"] = "Monthly: —"
 
-method = st.selectbox(
-    "Calculation method",
-    ["Bankrate-style", "NerdWallet-style"],
-    help="Affects input conventions and displayed assumptions."
-)
-
-render_mortgage(method)
+render_mortgage()
 
 # =============================
 # Location Management Section
@@ -73,3 +68,10 @@ render_sun()
 from disaster.ui import render_disaster
 
 render_disaster()
+
+# =============================
+# Profile Manager (sidebar)
+# =============================
+from profile.ui import render_profile_manager
+
+render_profile_manager()

@@ -1,9 +1,21 @@
+# Environment files
 .env
+
+# Local Python virtual environment
 .venv
 
+# Python bytecode
 *.pyc
 __pycache__
 
+# CDK output directory
 cdk.out
 
+# Private keys
 *.pem
+
+# Local profile data
+data/
+
+# JetBrains IDE settings
+.idea
