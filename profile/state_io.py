@@ -23,6 +23,12 @@ def _records_to_df(records: list[dict[str, Any]], columns: list[str]) -> pd.Data
 def extract_profile() -> Dict[str, Any]:
     return {
         "locations": st.session_state.get("map_data", {}).get("locations", []),
+        "assistant": {
+            "checklist": st.session_state.get("assistant_checklist", []),
+            "notes": st.session_state.get("assistant_notes", ""),
+            "cost_records": st.session_state.get("assistant_cost_records", []),
+            "inference_profile": st.session_state.get("assistant_inference_profile"),
+        },
         "mortgage": {
             "inputs": st.session_state.get("mortgage_inputs", {}),
             "include_flags": st.session_state.get("mortgage_include_flags", {}),
@@ -41,6 +47,13 @@ def apply_profile(profile: Dict[str, Any]) -> None:
     st.session_state["map_data"] = {"locations": locations}
     st.session_state["map_badge"] = f"{len(locations)} locations"
     st.session_state["map_expanded"] = True
+
+    assistant = profile.get("assistant", {})
+    if assistant:
+        st.session_state["assistant_checklist"] = assistant.get("checklist", [])
+        st.session_state["assistant_notes"] = assistant.get("notes", "")
+        st.session_state["assistant_cost_records"] = assistant.get("cost_records", [])
+        st.session_state["assistant_inference_profile"] = assistant.get("inference_profile")
 
     mortgage = profile.get("mortgage", {})
     st.session_state["mortgage_inputs"] = mortgage.get("inputs", {})

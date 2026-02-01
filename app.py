@@ -25,6 +25,13 @@ st.sidebar.markdown(
 
 st.title("House Planner (Prototype)")
 
+# =============================
+# Home Buying Checklist & Notes
+# =============================
+from assistant.ui import render_checklist_and_notes, render_floating_chatbot
+
+render_checklist_and_notes()
+
 # -----------------------------
 # Safe defaults for section badges
 # -----------------------------
@@ -75,3 +82,8 @@ render_disaster()
 from profile.ui import render_profile_manager
 
 render_profile_manager()
+
+# =============================
+# Floating Chatbot Assistant
+# =============================
+render_floating_chatbot()
