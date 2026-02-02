@@ -41,11 +41,11 @@ def render_profile_manager() -> None:
         )
 
         save_cols = st.columns([1, 1])
-        if save_cols[0].button("Save Profile", use_container_width=True):
+        if save_cols[0].button("Save Profile", width='stretch'):
             save_path = save_current_profile()
             st.success(f"Saved to {save_path}")
 
-        if save_cols[1].button("Load Profile", use_container_width=True):
+        if save_cols[1].button("Load Profile", width='stretch'):
             profile = load_profile(owner_sub, selected_slug)
             if not profile:
                 st.error("Profile not found.")

@@ -856,7 +856,7 @@ Annual amounts are automatically converted to monthly.
                     st.button(
                         "Redo Chart",
                         key="redo_chart",
-                        use_container_width=True
+                        width='stretch'
                     )
 
                 # ---- Display banner INSIDE expander ----

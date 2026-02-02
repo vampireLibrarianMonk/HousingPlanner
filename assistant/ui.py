@@ -515,7 +515,7 @@ def render_checklist_and_notes() -> None:
             checklist_editor = st.data_editor(
                 checklist_df,
                 num_rows="dynamic",
-                use_container_width=True,
+                width='stretch',
                 column_config={
                     "selected": st.column_config.CheckboxColumn(
                         "Select",
