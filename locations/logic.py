@@ -5,7 +5,8 @@ def arm_delete(confirm_key):
 
 
 def _get_loc_by_label(locations: list[dict], label: str) -> dict | None:
+    target = label.strip().lower()
     for loc in locations:
-        if loc["label"] == label:
+        if loc.get("label", "").strip().lower() == target:
             return loc
     return None

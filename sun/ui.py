@@ -115,6 +115,7 @@ def render_sun():
             house["lon"],
             zoom=19,
             size=800,
+            cache_buster=f"{house['lat']:.6f},{house['lon']:.6f}",
         )
 
         azimuths = compute_season_azimuths(

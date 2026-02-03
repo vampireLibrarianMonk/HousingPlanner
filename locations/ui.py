@@ -2,6 +2,7 @@ import streamlit as st
 
 from .providers import geocode_once
 from .logic import arm_delete
+from profile.ui import save_current_profile
 
 def render_locations():
     with st.expander(
@@ -13,7 +14,7 @@ def render_locations():
         # -----------------------------
         # Add-location form (keeps UI stable)
         # -----------------------------
-        with st.form("add_location_form"):
+        with st.form("add_location_form", clear_on_submit=True):
             cols = st.columns([0.25, 0.55, 0.2])
 
             with cols[0]:
@@ -43,12 +44,29 @@ def render_locations():
                 try:
                     lat, lon = geocode_once(location_address)
 
-                    st.session_state["map_data"]["locations"].append({
-                        "label": location_label,
-                        "address": location_address,
-                        "lat": lat,
-                        "lon": lon,
-                    })
+                    normalized_label = location_label.strip()
+                    updated = False
+                    updated_house = False
+                    for loc in st.session_state["map_data"]["locations"]:
+                        if loc.get("label", "").strip().lower() == normalized_label.lower():
+                            loc.update({
+                                "label": normalized_label,
+                                "address": location_address,
+                                "lat": lat,
+                                "lon": lon,
+                            })
+                            updated = True
+                            updated_house = normalized_label.lower() == "house"
+                            break
+
+                    if not updated:
+                        st.session_state["map_data"]["locations"].append({
+                            "label": normalized_label,
+                            "address": location_address,
+                            "lat": lat,
+                            "lon": lon,
+                        })
+                        updated_house = normalized_label.lower() == "house"
 
                     # Update badge and keep section open
                     count = len(st.session_state["map_data"]["locations"])
@@ -56,6 +74,9 @@ def render_locations():
 
                     # KEEP LOCATION SECTION OPEN
                     st.session_state["map_expanded"] = True
+
+                    if updated_house:
+                        st.rerun()
 
                 except Exception as e:
                     st.error(f"Geocoding error: {e}")
@@ -122,3 +143,10 @@ def render_locations():
                                 st.session_state["map_expanded"] = True
 
                                 st.rerun()
+
+            if st.button("Save", key="save_locations_profile"):
+                try:
+                    save_path = save_current_profile()
+                    st.success(f"Saved to {save_path}")
+                except Exception as exc:
+                    st.error(f"Save failed: {exc}")
