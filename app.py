@@ -42,6 +42,17 @@ if st.session_state["logout_requested"]:
         )
         st.session_state["logout_opened"] = True
 
+    st.markdown(
+        """
+        <style>
+          section[data-testid="stSidebar"],
+          div[data-testid="stSidebar"] {
+            display: none !important;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.markdown("""
     # You’re logged out
     We opened the logout page in a new tab. You can close this tab now.
