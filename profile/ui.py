@@ -32,20 +32,31 @@ def render_profile_manager() -> None:
         st.caption(f"House address: {house_slug.replace('_', ' ')}")
 
         available_profiles = list_profiles(owner_sub)
-        selected_slug = st.selectbox(
-            "Available Properties",
-            options=available_profiles or [house_slug],
-            index=available_profiles.index(house_slug)
-            if house_slug in available_profiles
-            else 0,
-        )
+        if available_profiles:
+            selected_slug = st.selectbox(
+                "Available Properties",
+                options=available_profiles,
+                index=available_profiles.index(house_slug)
+                if house_slug in available_profiles
+                else 0,
+            )
+        else:
+            st.selectbox(
+                "Available Properties",
+                options=[],
+                index=None,
+                placeholder="No saved profiles",
+                disabled=True,
+            )
+            selected_slug = None
 
         save_cols = st.columns([1, 1])
         if save_cols[0].button("Save Profile", width='stretch'):
             save_path = save_current_profile()
             st.success(f"Saved to {save_path}")
 
-        if save_cols[1].button("Load Profile", width='stretch'):
+        load_disabled = selected_slug is None
+        if save_cols[1].button("Load Profile", width='stretch', disabled=load_disabled):
             profile = load_profile(owner_sub, selected_slug)
             if not profile:
                 st.error("Profile not found.")

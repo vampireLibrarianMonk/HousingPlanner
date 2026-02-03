@@ -2,6 +2,9 @@
 # Global state
 # ---------------------------------------------
 from state import init_state
+from profile.storage import ensure_profiles_dir
+
+ensure_profiles_dir()
 init_state()
 
 # =============================
@@ -20,7 +23,7 @@ if st.sidebar.button("🚪 Logout", width='stretch'):
     st.components.v1.html(
         """
         <script>
-          window.location.assign('/logout');
+          window.top.location.assign('/logout');
         </script>
         """,
         height=0,
