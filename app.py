@@ -18,12 +18,18 @@ import streamlit as st
 st.set_page_config(page_title="House Planner (Prototype)", layout="wide")
 
 
-# Logout button in sidebar - triggers same-window navigation to /logout
+# Logout button in sidebar - opens logout in a new tab, then attempts to close this one
 if st.sidebar.button("🚪 Logout", width='stretch'):
     st.components.v1.html(
         """
         <script>
-          window.top.location.assign('/logout');
+          const logoutUrl = '/logout';
+          const newTab = window.open(logoutUrl, '_blank', 'noopener');
+          if (newTab) {
+            newTab.focus();
+          }
+          // Attempt to close the current window (may be blocked by browser settings)
+          window.close();
         </script>
         """,
         height=0,
