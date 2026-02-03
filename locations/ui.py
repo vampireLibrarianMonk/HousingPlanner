@@ -14,7 +14,7 @@ def render_locations():
         # -----------------------------
         # Add-location form (keeps UI stable)
         # -----------------------------
-        with st.form("add_location_form"):
+        with st.form("add_location_form", clear_on_submit=True):
             cols = st.columns([0.25, 0.55, 0.2])
 
             with cols[0]:

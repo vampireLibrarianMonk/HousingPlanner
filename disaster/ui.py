@@ -3,6 +3,7 @@ import folium
 from streamlit_folium import st_folium
 import math
 import pyproj
+from pathlib import Path
 from shapely.geometry import Point, shape
 from shapely.ops import transform
 from collections import defaultdict
@@ -21,6 +22,11 @@ from .flood import (
     flood_zone_style,
     flood_zone_at_point,
     FEMA_ZONE_EXPLANATIONS, zone_descriptions,
+    fetch_fema_repetitive_loss_block_groups,
+    repetitive_loss_total_style,
+    repetitive_loss_unmitigated_style,
+    REPETITIVE_LOSS_TOTAL_BUCKETS,
+    REPETITIVE_LOSS_UNMITIGATED_BUCKETS,
 )
 
 from .wildfire import (
@@ -31,15 +37,60 @@ from .wildfire import (
 
 from .heat import (
     fetch_heatrisk_point,
-    fetch_heatrisk_raster,
-    heatrisk_legend_items,
     fetch_nws_heat_alerts,
     fetch_historical_heat_events,
-    fetch_heat_event_geojson,
 )
 
 from .wind import fetch_wind_assessment
 from .wind import fetch_wind_layers
+from .earthquake import fetch_usgs_qfaults, earthquake_fault_style
+from .watersheds import (
+    fetch_usgs_huc12_watersheds,
+    watershed_style,
+    WATERSHED_HUTYPE_STYLES,
+)
+from .superfund import (
+    fetch_superfund_polygons,
+    fetch_superfund_cimc_points,
+    superfund_polygon_style,
+    superfund_point_style,
+    SUPERFUND_STATUS_STYLES,
+)
+from .ui_styles import TORNADO_MAG_STYLES, WIND_SWATH_STYLES
+
+
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+CONTENT_DIR = Path(__file__).with_name("content")
+LEGEND_DIR = Path(__file__).with_name("legends")
+
+
+def _load_template(path: Path, **kwargs):
+    text = path.read_text(encoding="utf-8")
+    return text.format(**kwargs) if kwargs else text
+
+
+def load_content(filename: str, **kwargs):
+    return _load_template(CONTENT_DIR / filename, **kwargs)
+
+
+def load_legend(filename: str, **kwargs):
+    return _load_template(LEGEND_DIR / filename, **kwargs)
+
+
+def _tornado_style(feature):
+    magnitude = _safe_int(feature.get("properties", {}).get("mag"))
+    if magnitude is not None:
+        magnitude = max(0, min(5, magnitude))
+    base = TORNADO_MAG_STYLES.get(magnitude)
+    if base:
+        return {k: v for k, v in base.items() if k in {"color", "weight", "dashArray"}}
+    return {"color": "#283593", "weight": 2, "dashArray": "6,4"}
 
 
 def render_disaster():
@@ -68,17 +119,22 @@ def render_disaster():
             # ---------------------------------------
             st.markdown("### Planned hazard layers (toggle to enable)")
 
+            st.markdown(load_content("planned_layers.md"))
+
             c1, c2 = st.columns(2)
 
             with c1:
                 st.checkbox("Flood zones (FEMA)", key="hz_flood")
                 st.checkbox("Wildfire risk", key="hz_wildfire")
                 st.checkbox("Historical disaster declarations", key="hz_disaster_history")
+                st.checkbox("FEMA repetitive loss areas (advanced risk)", key="hz_fema_rl")
+                st.checkbox("EPA Superfund sites (CERCLA)", key="hz_superfund")
 
             with c2:
                 st.checkbox("Heat risk", key="hz_heat")
                 st.checkbox("Earthquake fault proximity", key="hz_earthquake")
-                st.checkbox("Hurricane / wind exposure", key="hz_wind")
+                st.checkbox("Wind exposure", key="hz_wind")
+                st.checkbox("Watersheds (USGS HUC-12)", key="hz_watershed")
 
             st.divider()
 
@@ -153,6 +209,24 @@ def render_disaster():
             if not st.session_state.get("hz_disaster_history"):
                 st.session_state.pop("fema_disaster_history_last", None)
 
+            if not st.session_state.get("hz_fema_rl"):
+                st.session_state.pop("fema_rl_geojson", None)
+                st.session_state.pop("fema_rl_radius_key", None)
+
+            if not st.session_state.get("hz_earthquake"):
+                st.session_state.pop("usgs_qfaults_geojson", None)
+                st.session_state.pop("usgs_qfaults_radius_key", None)
+
+            if not st.session_state.get("hz_watershed"):
+                st.session_state.pop("usgs_huc12_geojson", None)
+                st.session_state.pop("usgs_huc12_radius_key", None)
+                st.session_state.pop("usgs_huc12_schema", None)
+
+            if not st.session_state.get("hz_superfund"):
+                st.session_state.pop("superfund_polygons_geojson", None)
+                st.session_state.pop("superfund_points_geojson", None)
+                st.session_state.pop("superfund_radius_key", None)
+
             # ---------------------------------------
             # Build radius-based bounding box (GIS-safe)
             # ---------------------------------------
@@ -176,6 +250,15 @@ def render_disaster():
             )
 
             wind_layers = None
+            track_features = []
+            tornado_features = []
+            repetitive_loss_total_features = []
+            repetitive_loss_unmitigated_features = []
+            earthquake_features = []
+            watershed_features = []
+            superfund_polygons = []
+            superfund_points = []
+            superfund_npl_points = []
 
             if st.session_state.get("hz_flood"):
                 # ---------------------------------------
@@ -355,36 +438,460 @@ def render_disaster():
                 # Wildfire legend (map overlay)
                 # ---------------------------------------
                 if wildfire_features:
-                    wildfire_legend_html = """
-                    <div style="
-                        position: fixed;
-                        bottom: 35px;
-                        left: 35px;
-                        z-index: 9999;
-                        background: white;
-                        padding: 10px 14px;
-                        border-radius: 6px;
-                        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-                        font-size: 13px;
-                    ">
-                        <b>Historical Wildfires (MTBS)</b><br>
-                        <span style="
-                            display:inline-block;
-                            width:14px;
-                            height:14px;
-                            background:#FF8A65;
-                            border:1px solid #D84315;
-                            margin-right:6px;">
-                        </span>
-                        Burned Area Perimeter<br>
-                        <span style="font-size:11px;color:#555;">
-                            Historical large fires only
-                        </span>
-                    </div>
-                    """
+                    m.get_root().html.add_child(
+                        folium.Element(load_legend("wildfire_legend.html"))
+                    )
+
+            # ---------------------------------------
+            # FEMA Repetitive Loss Areas (Block Group)
+            # ---------------------------------------
+            if st.session_state.get("hz_fema_rl"):
+                if (
+                        "fema_rl_geojson" not in st.session_state
+                        or st.session_state.get("fema_rl_radius_key") != bbox_key
+                ):
+                    st.session_state["fema_rl_geojson"] = (
+                        fetch_fema_repetitive_loss_block_groups(bbox)
+                    )
+                    st.session_state["fema_rl_radius_key"] = bbox_key
+
+                rl_geojson = st.session_state.get("fema_rl_geojson") or {}
+
+                for feature in rl_geojson.get("features", []):
+                    props = feature.get("properties")
+                    geom = feature.get("geometry")
+
+                    if not props or not geom:
+                        continue
+
+                    polygon_m = transform(project, shape(geom))
+
+                    if polygon_m.intersects(search_area):
+                        clipped_geom = polygon_m.intersection(search_area)
+
+                        if not clipped_geom.is_empty:
+                            base_feature = {
+                                "type": "Feature",
+                                "properties": props,
+                                "geometry": transform(
+                                    pyproj.Transformer.from_crs(
+                                        "EPSG:3857", "EPSG:4326", always_xy=True
+                                    ).transform,
+                                    clipped_geom,
+                                ).__geo_interface__,
+                            }
+
+                            total_count = props.get("any_rl") or 0
+                            unmitigated_count = props.get("any_rl_unmitigated") or 0
+
+                            if total_count > 0:
+                                repetitive_loss_total_features.append(base_feature)
+
+                            if unmitigated_count > 0:
+                                repetitive_loss_unmitigated_features.append(base_feature)
+
+                if repetitive_loss_total_features:
+                    folium.GeoJson(
+                        {
+                            "type": "FeatureCollection",
+                            "features": repetitive_loss_total_features,
+                        },
+                        name="FEMA repetitive loss (total, block group)",
+                        style_function=repetitive_loss_total_style,
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=["geoid_bg", "any_rl", "any_rl_unmitigated"],
+                            aliases=[
+                                "Block Group",
+                                "Total RL (count)",
+                                "Unmitigated RL (count)",
+                            ],
+                            sticky=True,
+                        ),
+                        control=True,
+                        show=False,
+                    ).add_to(m)
+
+                if repetitive_loss_unmitigated_features:
+                    folium.GeoJson(
+                        {
+                            "type": "FeatureCollection",
+                            "features": repetitive_loss_unmitigated_features,
+                        },
+                        name="FEMA repetitive loss (unmitigated, block group)",
+                        style_function=repetitive_loss_unmitigated_style,
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=["geoid_bg", "any_rl", "any_rl_unmitigated"],
+                            aliases=[
+                                "Block Group",
+                                "Total RL (count)",
+                                "Unmitigated RL (count)",
+                            ],
+                            sticky=True,
+                        ),
+                        control=True,
+                        show=False,
+                    ).add_to(m)
+
+                if repetitive_loss_total_features or repetitive_loss_unmitigated_features:
+                    total_legend_items = "".join(
+                        f"""
+                        <div style='margin-bottom:4px;'>
+                            <span style='display:inline-block;width:14px;height:14px;
+                                background:{colors['fill']};
+                                border:1px solid {colors['stroke']};
+                                margin-right:6px;'></span>
+                            {min_val}–{int(max_val) if max_val != float('inf') else '+'}
+                        </div>
+                        """
+                        for min_val, max_val, colors in REPETITIVE_LOSS_TOTAL_BUCKETS
+                    )
+
+                    unmitigated_legend_items = "".join(
+                        f"""
+                        <div style='margin-bottom:4px;'>
+                            <span style='display:inline-block;width:14px;height:14px;
+                                background:{colors['fill']};
+                                border:1px solid {colors['stroke']};
+                                margin-right:6px;'></span>
+                            {min_val}–{int(max_val) if max_val != float('inf') else '+'}
+                        </div>
+                        """
+                        for min_val, max_val, colors in REPETITIVE_LOSS_UNMITIGATED_BUCKETS
+                    )
 
                     m.get_root().html.add_child(
-                        folium.Element(wildfire_legend_html)
+                        folium.Element(
+                            load_legend(
+                                "fema_repetitive_loss_legend.html",
+                                total_legend_items=total_legend_items,
+                                unmitigated_legend_items=unmitigated_legend_items,
+                            )
+                        )
+                    )
+
+            # ---------------------------------------
+            # Earthquake fault lines (USGS Qfaults)
+            # ---------------------------------------
+            if st.session_state.get("hz_earthquake"):
+                if (
+                        "usgs_qfaults_geojson" not in st.session_state
+                        or st.session_state.get("usgs_qfaults_radius_key") != bbox_key
+                ):
+                    st.session_state["usgs_qfaults_geojson"] = fetch_usgs_qfaults(bbox)
+                    st.session_state["usgs_qfaults_radius_key"] = bbox_key
+
+                qfaults_geojson = st.session_state.get("usgs_qfaults_geojson") or {}
+
+                for feature in qfaults_geojson.get("features", []):
+                    props = feature.get("properties")
+                    geom = feature.get("geometry")
+
+                    if not props or not geom:
+                        continue
+
+                    line_m = transform(project, shape(geom))
+
+                    if line_m.intersects(search_area):
+                        clipped_geom = line_m.intersection(search_area)
+
+                        if not clipped_geom.is_empty:
+                            earthquake_features.append({
+                                "type": "Feature",
+                                "properties": props,
+                                "geometry": transform(
+                                    pyproj.Transformer.from_crs(
+                                        "EPSG:3857", "EPSG:4326", always_xy=True
+                                    ).transform,
+                                    clipped_geom,
+                                ).__geo_interface__,
+                            })
+
+                if earthquake_features:
+                    folium.GeoJson(
+                        {
+                            "type": "FeatureCollection",
+                            "features": earthquake_features,
+                        },
+                        name="USGS Quaternary faults",
+                        style_function=earthquake_fault_style,
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=["fault_name", "section_name", "age", "slip_rate"],
+                            aliases=["Fault", "Section", "Age", "Slip rate"],
+                            sticky=True,
+                        ),
+                        control=True,
+                        show=False,
+                    ).add_to(m)
+
+                    m.get_root().html.add_child(
+                        folium.Element(load_legend("earthquake_legend.html"))
+                    )
+
+            # ---------------------------------------
+            # Watersheds (USGS HUC-12)
+            # ---------------------------------------
+            if st.session_state.get("hz_watershed"):
+                if (
+                        "usgs_huc12_geojson" not in st.session_state
+                        or st.session_state.get("usgs_huc12_radius_key") != bbox_key
+                        or st.session_state.get("usgs_huc12_schema") != "huc12_v2"
+                ):
+                    st.session_state["usgs_huc12_geojson"] = fetch_usgs_huc12_watersheds(bbox)
+                    st.session_state["usgs_huc12_radius_key"] = bbox_key
+                    st.session_state["usgs_huc12_schema"] = "huc12_v2"
+
+                huc12_geojson = st.session_state.get("usgs_huc12_geojson") or {}
+
+                for feature in huc12_geojson.get("features", []):
+                    props = feature.get("properties")
+                    geom = feature.get("geometry")
+
+                    if not props or not geom:
+                        continue
+
+                    polygon_m = transform(project, shape(geom))
+
+                    if polygon_m.intersects(search_area):
+                        clipped_geom = polygon_m.intersection(search_area)
+
+                        if not clipped_geom.is_empty:
+                            watershed_features.append({
+                                "type": "Feature",
+                                "properties": props,
+                                "geometry": transform(
+                                    pyproj.Transformer.from_crs(
+                                        "EPSG:3857", "EPSG:4326", always_xy=True
+                                    ).transform,
+                                    clipped_geom,
+                                ).__geo_interface__,
+                            })
+
+                if watershed_features:
+                    tooltip_fields = ["huc12", "name", "areasqkm", "states"]
+                    tooltip_aliases = ["HUC-12", "Watershed", "Area (sq km)", "States"]
+
+                    if any(
+                        feature.get("properties", {}).get("hutype")
+                        for feature in watershed_features
+                    ):
+                        tooltip_fields.insert(2, "hutype")
+                        tooltip_aliases.insert(2, "HU Type")
+
+                    folium.GeoJson(
+                        {
+                            "type": "FeatureCollection",
+                            "features": watershed_features,
+                        },
+                        name="USGS HUC-12 watersheds",
+                        style_function=watershed_style,
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=tooltip_fields,
+                            aliases=tooltip_aliases,
+                            sticky=True,
+                        ),
+                        control=True,
+                        show=False,
+                    ).add_to(m)
+
+                    watershed_legend_items = "".join(
+                        f"""
+                        <div style='margin-bottom:4px;'>
+                            <span style='display:inline-block;width:14px;height:14px;
+                                background:{style['fill']};
+                                border:1px solid {style['stroke']};
+                                margin-right:6px;'></span>
+                            {style['label']}
+                        </div>
+                        """
+                        for style in WATERSHED_HUTYPE_STYLES.values()
+                    )
+
+                    m.get_root().html.add_child(
+                        folium.Element(
+                            load_legend(
+                                "watershed_legend.html",
+                                watershed_legend_items=watershed_legend_items,
+                            )
+                        )
+                    )
+
+            # ---------------------------------------
+            # EPA Superfund Sites (CERCLA)
+            # ---------------------------------------
+            if st.session_state.get("hz_superfund"):
+                if (
+                        "superfund_polygons_geojson" not in st.session_state
+                        or st.session_state.get("superfund_radius_key") != bbox_key
+                ):
+                    st.session_state["superfund_polygons_geojson"] = fetch_superfund_polygons(bbox)
+                    st.session_state["superfund_points_geojson"] = fetch_superfund_cimc_points(bbox)
+                    st.session_state["superfund_radius_key"] = bbox_key
+
+                polygons_geojson = st.session_state.get("superfund_polygons_geojson") or {}
+                points_geojson = st.session_state.get("superfund_points_geojson") or {}
+
+                for feature in polygons_geojson.get("features", []):
+                    props = feature.get("properties")
+                    geom = feature.get("geometry")
+
+                    if not props or not geom:
+                        continue
+
+                    polygon_m = transform(project, shape(geom))
+
+                    if polygon_m.intersects(search_area):
+                        clipped_geom = polygon_m.intersection(search_area)
+
+                        if not clipped_geom.is_empty:
+                            superfund_polygons.append({
+                                "type": "Feature",
+                                "properties": props,
+                                "geometry": transform(
+                                    pyproj.Transformer.from_crs(
+                                        "EPSG:3857", "EPSG:4326", always_xy=True
+                                    ).transform,
+                                    clipped_geom,
+                                ).__geo_interface__,
+                            })
+
+                            centroid = clipped_geom.centroid
+                            superfund_npl_points.append({
+                                "type": "Feature",
+                                "properties": {
+                                    "SITE_NAME": props.get("SITE_NAME"),
+                                    "EPA_ID": props.get("EPA_ID"),
+                                    "NPL_STATUS_CODE": props.get("NPL_STATUS_CODE"),
+                                    "STATE_CODE": props.get("STATE_CODE"),
+                                    "COUNTY": props.get("COUNTY"),
+                                    "CITY_NAME": props.get("CITY_NAME"),
+                                },
+                                "geometry": transform(
+                                    pyproj.Transformer.from_crs(
+                                        "EPSG:3857", "EPSG:4326", always_xy=True
+                                    ).transform,
+                                    centroid,
+                                ).__geo_interface__,
+                            })
+
+                for feature in points_geojson.get("features", []):
+                    props = feature.get("properties")
+                    geom = feature.get("geometry")
+
+                    if not props or not geom:
+                        continue
+
+                    point_m = transform(project, shape(geom))
+
+                    if point_m.intersects(search_area):
+                        superfund_points.append(feature)
+
+                if superfund_polygons:
+                    folium.GeoJson(
+                        {
+                            "type": "FeatureCollection",
+                            "features": superfund_polygons,
+                        },
+                        name="Superfund NPL site boundaries",
+                        style_function=superfund_polygon_style,
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=["SITE_NAME", "EPA_ID", "NPL_STATUS_CODE", "STATE_CODE"],
+                            aliases=["Site", "EPA ID", "NPL Status", "State"],
+                            sticky=True,
+                        ),
+                        control=True,
+                        show=False,
+                    ).add_to(m)
+
+                if superfund_points:
+                    superfund_points_group = folium.FeatureGroup(
+                        name="Superfund CIMC sites (points)",
+                        show=False,
+                    )
+
+                    for feature in superfund_points:
+                        props = feature.get("properties", {})
+                        geom = feature.get("geometry") or {}
+                        coords = geom.get("coordinates")
+
+                        if not coords:
+                            continue
+
+                        style = superfund_point_style(feature)
+                        tooltip_text = (
+                            f"<b>{props.get('SF_SITE_NAME', 'Superfund Site')}</b><br>"
+                            f"SF ID: {props.get('SF_SITE_ID', 'Unknown')}<br>"
+                            f"Archived: {props.get('SF_ARCHIVED_IND', 'Unknown')}<br>"
+                            f"State: {props.get('STATE_CODE', 'Unknown')}"
+                        )
+
+                        folium.CircleMarker(
+                            location=[coords[1], coords[0]],
+                            radius=style["radius"],
+                            color=style["color"],
+                            fill=True,
+                            fill_color=style["fillColor"],
+                            fill_opacity=style["fillOpacity"],
+                            weight=style["weight"],
+                            tooltip=folium.Tooltip(tooltip_text),
+                        ).add_to(superfund_points_group)
+
+                    superfund_points_group.add_to(m)
+
+                if superfund_npl_points:
+                    superfund_npl_group = folium.FeatureGroup(
+                        name="Superfund NPL sites (centroids)",
+                        show=False,
+                    )
+
+                    for feature in superfund_npl_points:
+                        props = feature.get("properties", {})
+                        geom = feature.get("geometry") or {}
+                        coords = geom.get("coordinates")
+
+                        if not coords:
+                            continue
+
+                        tooltip_text = (
+                            f"<b>{props.get('SITE_NAME', 'NPL Site')}</b><br>"
+                            f"EPA ID: {props.get('EPA_ID', 'Unknown')}<br>"
+                            f"NPL Status: {props.get('NPL_STATUS_CODE', 'Unknown')}<br>"
+                            f"State: {props.get('STATE_CODE', 'Unknown')}"
+                        )
+
+                        folium.CircleMarker(
+                            location=[coords[1], coords[0]],
+                            radius=4,
+                            color="#5E35B1",
+                            fill=True,
+                            fill_color="#9575CD",
+                            fill_opacity=0.8,
+                            weight=1,
+                            tooltip=folium.Tooltip(tooltip_text),
+                        ).add_to(superfund_npl_group)
+
+                    superfund_npl_group.add_to(m)
+
+                if superfund_polygons or superfund_points or superfund_npl_points:
+                    superfund_legend_items = "".join(
+                        f"""
+                        <div style='margin-bottom:4px;'>
+                            <span style='display:inline-block;width:14px;height:14px;
+                                background:{style['color']};
+                                border:1px solid {style['color']};
+                                margin-right:6px;'></span>
+                            {style['label']}
+                        </div>
+                        """
+                        for style in SUPERFUND_STATUS_STYLES.values()
+                    )
+
+                    m.get_root().html.add_child(
+                        folium.Element(
+                            load_legend(
+                                "superfund_legend.html",
+                                superfund_legend_items=superfund_legend_items,
+                            )
+                        )
                     )
 
             # ---------------------------------------
@@ -405,7 +912,6 @@ def render_disaster():
                     "heatrisk_raster" not in st.session_state
                     or st.session_state.get("heatrisk_cache_key") != heatrisk_key
                 ):
-                    st.session_state["heatrisk_raster"] = fetch_heatrisk_raster(bbox)
                     st.session_state["heatrisk_point"] = fetch_heatrisk_point(
                         house["lat"],
                         house["lon"],
@@ -419,118 +925,12 @@ def render_disaster():
                         house["lon"],
                         days=365,
                     )
-                    st.session_state["heatrisk_history_polygons"] = []
                     st.session_state["heatrisk_cache_key"] = heatrisk_key
 
-                heatrisk_raster = st.session_state.get("heatrisk_raster")
                 heatrisk_summary = st.session_state.get("heatrisk_point")
                 heat_alerts = st.session_state.get("heatrisk_alerts")
                 heat_history = st.session_state.get("heatrisk_history")
-                heat_history_polygons = st.session_state.get("heatrisk_history_polygons")
 
-                if heatrisk_raster and heatrisk_raster.get("href") and heatrisk_summary:
-                    folium.raster_layers.ImageOverlay(
-                        image=heatrisk_raster["href"],
-                        bounds=[
-                            [bbox[1], bbox[0]],
-                            [bbox[3], bbox[2]],
-                        ],
-                        name="HeatRisk (NWS)",
-                        opacity=0.55,
-                        interactive=False,
-                        cross_origin=False,
-                        zindex=4,
-                    ).add_to(m)
-
-                    mask_polygon = {
-                        "type": "Feature",
-                        "geometry": {
-                            "type": "Polygon",
-                            "coordinates": [
-                                [
-                                    [-180, -90],
-                                    [180, -90],
-                                    [180, 90],
-                                    [-180, 90],
-                                    [-180, -90],
-                                ],
-                                list(search_area_latlon.exterior.coords),
-                            ],
-                        },
-                        "properties": {},
-                    }
-
-                    folium.GeoJson(
-                        mask_polygon,
-                        name="HeatRisk Mask",
-                        style_function=lambda _: {
-                            "fillColor": "#FFFFFF",
-                            "fillOpacity": 0.0,
-                            "color": "#FFFFFF",
-                            "weight": 0,
-                            "fillRule": "evenodd",
-                        },
-                        control=False,
-                    ).add_to(m)
-
-                if heat_history and heat_history_polygons is not None:
-                    if not heat_history_polygons:
-                        for event in heat_history:
-                            geojson = fetch_heat_event_geojson(event)
-                            if not geojson:
-                                continue
-
-                            for feature in geojson.get("features", []) or []:
-                                geom = feature.get("geometry")
-                                if not geom:
-                                    continue
-
-                                polygon_m = transform(project, shape(geom))
-                                if not polygon_m.intersects(search_area):
-                                    continue
-
-                                clipped_geom = polygon_m.intersection(search_area)
-                                if clipped_geom.is_empty:
-                                    continue
-
-                                heat_history_polygons.append({
-                                    "type": "Feature",
-                                    "properties": {
-                                        "name": event.get("name"),
-                                        "issue": event.get("issue"),
-                                        "expire": event.get("expire"),
-                                    },
-                                    "geometry": transform(
-                                        pyproj.Transformer.from_crs(
-                                            "EPSG:3857", "EPSG:4326", always_xy=True
-                                        ).transform,
-                                        clipped_geom,
-                                    ).__geo_interface__,
-                                })
-
-                        st.session_state["heatrisk_history_polygons"] = heat_history_polygons
-
-                    if heat_history_polygons:
-                        folium.GeoJson(
-                            {
-                                "type": "FeatureCollection",
-                                "features": heat_history_polygons,
-                            },
-                            name="Heat Advisory History (12 mo)",
-                            style_function=lambda _: {
-                                "color": "#E65100",
-                                "weight": 2,
-                                "fillColor": "#FF9800",
-                                "fillOpacity": 0.25,
-                            },
-                            tooltip=folium.GeoJsonTooltip(
-                                fields=["name", "issue", "expire"],
-                                aliases=["Event", "Issue", "Expire"],
-                                sticky=True,
-                            ),
-                            control=True,
-                            show=False,
-                        ).add_to(m)
 
 
             # ---------------------------------------
@@ -544,38 +944,63 @@ def render_disaster():
                     bbox=bbox,
                 )
 
-                # Hurricane wind swaths (polygons)
-                swath_styles = {
-                    "64kt": {"color": "#B71C1C", "fillColor": "#B71C1C", "fillOpacity": 0.35},
-                    "50kt": {"color": "#E53935", "fillColor": "#E53935", "fillOpacity": 0.30},
-                    "34kt": {"color": "#FB8C00", "fillColor": "#FB8C00", "fillOpacity": 0.25},
-                }
-
+                # Hurricane wind swaths (polygons) - grouped by level
                 for level, features in wind_layers["wind_swaths"].items():
                     if features:
+                        swath_count = len(features)
+                        swath_group_name = f"🌀 Wind Swaths ({level}) [{swath_count}]"
                         folium.GeoJson(
                             {
                                 "type": "FeatureCollection",
                                 "features": features,
                             },
-                            name=f"Hurricane wind swath – {level}",
-                            style_function=lambda _, s=swath_styles[level]: s,
+                            name=swath_group_name,
+                            style_function=lambda _, s=WIND_SWATH_STYLES[level]: s,
                             control=True,
                             show=False,
                         ).add_to(m)
 
-                # Hurricane tracks (lines)
+                # Hurricane tracks (lines) - all in one group
                 if wind_layers["tracks"]:
+                    for feature in wind_layers["tracks"]:
+                        props = feature.get("properties", {}) or {}
+                        label = (
+                            props.get("stormname")
+                            or props.get("name")
+                            or props.get("storm_id")
+                            or "Hurricane"
+                        )
+                        advisory = props.get("advisory") or props.get("advisory_number") or props.get("advisoryNumber") or ""
+                        dtg = props.get("datetime") or props.get("advisoryTime") or props.get("dtg") or ""
+                        
+                        enriched_feature = {
+                            "type": "Feature",
+                            "properties": {
+                                **props,
+                                "label": label,
+                                "advisory": advisory,
+                                "datetime": dtg,
+                            },
+                            "geometry": feature.get("geometry"),
+                        }
+                        track_features.append(enriched_feature)
+
+                    track_count = len(track_features)
                     folium.GeoJson(
                         {
                             "type": "FeatureCollection",
-                            "features": wind_layers["tracks"],
+                            "features": track_features,
                         },
-                        name="Hurricane tracks",
+                        name=f"🌀 Hurricane Tracks [{track_count}]",
                         style_function=lambda _: {
                             "color": "#6A1B9A",
                             "weight": 2.5,
                         },
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=["label", "advisory", "datetime"],
+                            aliases=["Storm", "Advisory", "Timestamp"],
+                            sticky=True,
+                        ),
                         control=True,
                         show=False,
                     ).add_to(m)
@@ -591,19 +1016,57 @@ def render_disaster():
                     )
                 except Exception:
                     wind_assessment = None
-                # Tornado paths (lines)
+                # Tornado paths (lines) - all in one group
                 if wind_layers["tornado_paths"]:
+                    for feature in wind_layers["tornado_paths"]:
+                        props = feature.get("properties", {}) or {}
+                        year = _safe_int(props.get("yr"))
+                        month = _safe_int(props.get("mo"))
+                        day = _safe_int(props.get("dy"))
+                        magnitude = props.get("mag")
+                        length = props.get("len")
+                        
+                        label_parts = [
+                            part
+                            for part in [
+                                str(year) if year is not None else None,
+                                (
+                                    f"{month:02d}-{day:02d}"
+                                    if month is not None and day is not None
+                                    else None
+                                ),
+                                f"Mag {magnitude}" if magnitude is not None else None,
+                            ]
+                            if part
+                        ]
+                        label = "Tornado path" + (" • " + " ".join(label_parts) if label_parts else "")
+                        
+                        enriched_feature = {
+                            "type": "Feature",
+                            "properties": {
+                                **props,
+                                "label": label,
+                                "year": year,
+                                "magnitude": magnitude,
+                                "path_length_mi": length,
+                            },
+                            "geometry": feature.get("geometry"),
+                        }
+                        tornado_features.append(enriched_feature)
+
+                    tornado_count = len(tornado_features)
                     folium.GeoJson(
                         {
                             "type": "FeatureCollection",
-                            "features": wind_layers["tornado_paths"],
+                            "features": tornado_features,
                         },
-                        name="Tornado paths",
-                        style_function=lambda _: {
-                            "color": "#283593",
-                            "weight": 2,
-                            "dashArray": "6,4",
-                        },
+                        name=f"🌪️ Tornado Paths [{tornado_count}]",
+                        style_function=_tornado_style,
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=["label", "year", "magnitude", "path_length_mi"],
+                            aliases=["Event", "Year", "Magnitude", "Length (mi)"],
+                            sticky=True,
+                        ),
                         control=True,
                         show=False,
                     ).add_to(m)
@@ -642,16 +1105,115 @@ def render_disaster():
 
                     if zone_info:
                         st.markdown(
-                            f"""
-            ### {zone_info['title']}
-
-            - **Summary:** {zone_info['summary']}
-            - **Flood insurance:** {zone_info['insurance']}
-            - **SFHA:** {"Yes" if house_sfha == "T" else "No"}
-            - **Determination:** Flood zone determined at the house location.
-            """,
+                            load_content(
+                                "flood_zone.md",
+                                title=zone_info["title"],
+                                summary=zone_info["summary"],
+                                insurance=zone_info["insurance"],
+                                sfha="Yes" if house_sfha == "T" else "No",
+                            ),
                             unsafe_allow_html=True,
                         )
+
+            if st.session_state.get("hz_fema_rl"):
+                if repetitive_loss_total_features or repetitive_loss_unmitigated_features:
+                    total_rl = sum(
+                        feature.get("properties", {}).get("any_rl") or 0
+                        for feature in repetitive_loss_total_features
+                    )
+                    total_unmitigated = sum(
+                        feature.get("properties", {}).get("any_rl_unmitigated") or 0
+                        for feature in repetitive_loss_unmitigated_features
+                    )
+
+                    st.markdown(
+                        load_content(
+                            "fema_rl_present.md",
+                            total_count=len(repetitive_loss_total_features),
+                            unmitigated_count=len(repetitive_loss_unmitigated_features),
+                            total_rl=total_rl,
+                            total_unmitigated=total_unmitigated,
+                        )
+                    )
+                else:
+                    st.markdown(
+                        load_content(
+                            "fema_rl_empty.md",
+                            radius_miles=radius_miles,
+                        )
+                    )
+
+            if st.session_state.get("hz_earthquake"):
+                if earthquake_features:
+                    st.markdown(
+                        load_content(
+                            "earthquake_present.md",
+                            fault_count=len(earthquake_features),
+                        )
+                    )
+                else:
+                    st.markdown(
+                        load_content(
+                            "earthquake_empty.md",
+                            radius_miles=radius_miles,
+                        )
+                    )
+
+            if st.session_state.get("hz_watershed"):
+                if watershed_features:
+                    hutype_counts = defaultdict(int)
+                    for feature in watershed_features:
+                        hutype = feature.get("properties", {}).get("hutype") or "Unknown"
+                        hutype_counts[hutype] += 1
+
+                    hutype_summary = "\n".join(
+                        f"- **{WATERSHED_HUTYPE_STYLES.get(code, {'label': code}).get('label', code)}**: {count} polygon(s)"
+                        for code, count in sorted(hutype_counts.items())
+                    )
+
+                    st.markdown(
+                        load_content(
+                            "watershed_present.md",
+                            watershed_count=len(watershed_features),
+                            hutype_summary=hutype_summary,
+                        )
+                    )
+                else:
+                    st.markdown(
+                        load_content(
+                            "watershed_empty.md",
+                            radius_miles=radius_miles,
+                        )
+                    )
+
+            if st.session_state.get("hz_superfund"):
+                if superfund_polygons or superfund_points or superfund_npl_points:
+                    status_counts = defaultdict(int)
+                    for feature in superfund_points:
+                        status = feature.get("properties", {}).get("SF_ARCHIVED_IND") or "Unknown"
+                        status_counts[status] += 1
+
+                    status_summary = "\n".join(
+                        f"- **{SUPERFUND_STATUS_STYLES.get(code, {'label': code}).get('label', code)}**: {count} point(s)"
+                        for code, count in sorted(status_counts.items())
+                    )
+
+                    st.markdown(
+                        load_content(
+                            "superfund_present.md",
+                            npl_count=len(superfund_polygons),
+                            point_count=len(superfund_points),
+                            centroid_count=len(superfund_npl_points),
+                            status_summary=status_summary,
+                        )
+                    )
+                else:
+                    st.markdown(
+                        load_content(
+                            "superfund_empty.md",
+                            radius_miles=radius_miles,
+                        )
+                    )
 
             if st.session_state.get("hz_wildfire"):
                 if wildfire_features:
@@ -665,28 +1227,19 @@ def render_disaster():
                     fire_count = len(wildfire_features)
 
                     st.markdown(
-                        f"""
-            ### Historical Wildfire Context
-
-            - **{fire_count} historical wildfire perimeter(s)** intersect the area within **{radius_miles} miles**
-            - **Most recent recorded fire year:** {most_recent_year}
-            - These represent **past burned areas**, not current fire conditions
-            - Presence does **not** indicate future wildfire likelihood
-
-            Wildfire data source: USGS / USDA MTBS
-            """
+                        load_content(
+                            "wildfire_present.md",
+                            fire_count=fire_count,
+                            radius_miles=radius_miles,
+                            most_recent_year=most_recent_year,
+                        )
                     )
                 else:
                     st.markdown(
-                        f"""
-            ### Historical Wildfire Context
-
-            - **No mapped historical wildfire perimeters** intersect the area within **{radius_miles} miles**
-            - This reflects **recorded large-fire history only**
-            - Absence of recorded perimeters does **not guarantee zero wildfire risk**
-
-            Wildfire data source: USGS / USDA MTBS
-            """
+                        load_content(
+                            "wildfire_empty.md",
+                            radius_miles=radius_miles,
+                        )
                     )
 
             if st.session_state.get("hz_disaster_history"):
@@ -709,14 +1262,12 @@ def render_disaster():
 
                 if rows:
                     st.markdown(
-                        f"""
-    ### Historical Disaster Declarations (County-Level)
-
-    - **County (FEMA designatedArea):** {designated_area}
-    - **State:** {state_abbrev}
-    - **Records returned:** {len(rows)}
-    - **Sort:** declarationDate (newest → oldest)
-    """
+                        load_content(
+                            "disaster_history_present.md",
+                            designated_area=designated_area,
+                            state_abbrev=state_abbrev,
+                            record_count=len(rows),
+                        )
                     )
 
                     df = pd.DataFrame(rows)
@@ -762,13 +1313,11 @@ def render_disaster():
                         st.json(meta)
                 else:
                     st.markdown(
-                        f"""
-    ### Historical Disaster Declarations (County-Level)
-
-    - **County (FEMA designatedArea):** {designated_area or "Unknown"}
-    - **State:** {state_abbrev or "Unknown"}
-    - **Result:** No records returned from FEMA for this county filter.
-    """
+                        load_content(
+                            "disaster_history_empty.md",
+                            designated_area=designated_area or "Unknown",
+                            state_abbrev=state_abbrev or "Unknown",
+                        )
                     )
 
                     nearby_zones = set()
@@ -778,40 +1327,34 @@ def render_disaster():
                     if wind_assessment.get("asce_available"):
                         asce = wind_assessment.get("asce") or {}
                         st.markdown(
-                            f"""
-            ### ASCE 7 Design Wind Speed (Licensed)
-
-            - **Design wind speed (MRI 700/300):** {asce.get('design_wind_speed_mph') or 'Not available'}
-            - **Risk category:** {asce.get('risk_category', 'II')}
-            - **Standard:** {asce.get('standard', '7-16')}
-            - **Hurricane-prone region:** {'Yes' if asce.get('is_hurricane_prone') else 'No'}
-
-            ASCE data is **design-level** and requires a licensed API token.
-            """
+                            load_content(
+                                "wind_asce.md",
+                                design_speed=asce.get("design_wind_speed_mph")
+                                or "Not available",
+                                risk_category=asce.get("risk_category", "II"),
+                                standard=asce.get("standard", "7-16"),
+                                hurricane_prone="Yes"
+                                if asce.get("is_hurricane_prone")
+                                else "No",
+                            )
                         )
                     else:
                         st.markdown(
-                            f"""
-            ### Wind & Hurricane Exposure (Screening Level)
-
-            - **Wind exposure category:** {wind_assessment['screening_wind_category']}
-            - **Hurricane-force winds recorded:** {'Yes' if wind_assessment['hurricane_force_winds'] else 'No'}
-            - **Overall risk tier:** {wind_assessment['risk_tier']}
-            - **Data source:** {wind_assessment['source']}
-            - **Note:** {wind_assessment.get('note', '')}
-
-            This is a **screening-level** view based on historical NOAA layers. It does
-            **not** represent code design wind speeds.
-            """
+                            load_content(
+                                "wind_screening.md",
+                                wind_category=wind_assessment[
+                                    "screening_wind_category"
+                                ],
+                                hurricane_force="Yes"
+                                if wind_assessment["hurricane_force_winds"]
+                                else "No",
+                                risk_tier=wind_assessment["risk_tier"],
+                                source=wind_assessment["source"],
+                                note=wind_assessment.get("note", ""),
+                            )
                         )
                 else:
-                    st.markdown(
-                        """
-            ### Wind & Hurricane Screening (NOAA)
-
-            - No NOAA wind assessment available for this location.
-            """
-                    )
+                    st.markdown(load_content("wind_no_data.md"))
 
                 if wind_layers:
                     missing_layers = []
@@ -833,94 +1376,107 @@ def render_disaster():
                             + ", ".join(missing_layers)
                         )
 
-            if st.session_state.get("hz_wind"):
-                wind_legend_html = """
-                <div style="
-                    position: fixed;
-                    bottom: 35px;
-                    right: 35px;
-                    z-index: 9999;
-                    background: white;
-                    padding: 10px 14px;
-                    border-radius: 6px;
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-                    font-size: 13px;
-                ">
-                    <b>Wind & Hurricane Layers</b><br>
+                    swath_counts = {
+                        level: len(features)
+                        for level, features in swaths.items()
+                        if isinstance(features, list)
+                    }
+                    track_count = len(wind_layers.get("tracks") or [])
+                    tornado_layers = wind_layers.get("tornado_paths") or []
+                    tornado_count = len(tornado_layers)
+                    tornado_years = sorted(
+                        {
+                            _safe_int(feature.get("properties", {}).get("yr"))
+                            for feature in tornado_layers
+                        }
+                    )
+                    tornado_years = [year for year in tornado_years if year is not None]
 
-                    <span style="display:inline-block;width:14px;height:14px;
-                        background:#B71C1C;margin-right:6px;"></span>
-                    Hurricane-force wind (64 kt)<br>
+                    if swath_counts or track_count or tornado_count:
+                        swath_summary = ", ".join(
+                            f"{level}: {count}" for level, count in swath_counts.items()
+                        )
+                        year_range = (
+                            f"{tornado_years[0]}–{tornado_years[-1]}"
+                            if tornado_years
+                            else "unknown"
+                        )
+                        st.info(
+                            "Wind layers returned — "
+                            f"Swaths ({swath_summary or 'none'}), "
+                            f"Hurricane tracks: {track_count}, "
+                            f"Tornado tracks: {tornado_count} (years {year_range})"
+                        )
 
-                    <span style="display:inline-block;width:14px;height:14px;
-                        background:#E53935;margin-right:6px;"></span>
-                    Strong wind (50 kt)<br>
+                    swath_rows = []
+                    for level, features in swaths.items():
+                        for feature in features or []:
+                            props = feature.get("properties", {}) or {}
+                            swath_rows.append({
+                                "wind_level": level,
+                                "file_date": props.get("idp_filedate"),
+                                "percentage": props.get("percentage"),
+                            })
 
-                    <span style="display:inline-block;width:14px;height:14px;
-                        background:#FB8C00;margin-right:6px;"></span>
-                    Tropical storm wind (34 kt)<br>
+                    track_rows = []
+                    for feature in track_features:
+                        props = feature.get("properties", {}) or {}
+                        track_rows.append({
+                            "storm": props.get("label"),
+                            "advisory": props.get("advisory"),
+                            "datetime": props.get("datetime"),
+                        })
 
-                    <svg width="14" height="10" style="margin-right:6px;">
-                        <line x1="0" y1="5" x2="14" y2="5"
-                              stroke="#6A1B9A" stroke-width="2"/>
-                    </svg>
-                    Hurricane track<br>
+                    tornado_rows = []
+                    for feature in tornado_features:
+                        props = feature.get("properties", {}) or {}
+                        year = _safe_int(props.get("yr"))
+                        month = _safe_int(props.get("mo"))
+                        day = _safe_int(props.get("dy"))
+                        date_value = None
+                        if year and month and day:
+                            date_value = f"{year:04d}-{month:02d}-{day:02d}"
+                        tornado_rows.append({
+                            "date": date_value,
+                            "magnitude": props.get("mag"),
+                            "path_length_mi": props.get("len"),
+                        })
 
-                    <svg width="14" height="10" style="margin-right:6px;">
-                        <line x1="0" y1="5" x2="14" y2="5"
-                              stroke="#283593" stroke-width="2"
-                              stroke-dasharray="4,3"/>
-                    </svg>
-                    Tornado path
-                </div>
-                """
+                    has_any_table = any([swath_rows, track_rows, tornado_rows])
+                    if has_any_table:
+                        st.markdown("#### Wind events")
 
-                m.get_root().html.add_child(folium.Element(wind_legend_html))
+                    if track_rows:
+                        tracks_df = pd.DataFrame(track_rows)
+                        tracks_df["datetime"] = pd.to_datetime(
+                            tracks_df["datetime"], errors="coerce"
+                        )
+                        tracks_df = tracks_df.sort_values("datetime", ascending=False)
+                        tracks_df["datetime"] = tracks_df["datetime"].dt.strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                        st.markdown("**Hurricane tracks**")
+                        st.dataframe(tracks_df, width="stretch", hide_index=True)
 
-            if st.session_state.get("hz_heat") and heatrisk_summary:
-                legend_rows = "".join(
-                    f"<span style='display:inline-block;width:14px;height:14px;"
-                    f"background:{color};margin-right:6px;'></span>{label}<br>"
-                    for label, color in heatrisk_legend_items()
-                )
-                heat_legend_html = f"""
-                <div style="
-                    position: fixed;
-                    bottom: 35px;
-                    left: 35px;
-                    z-index: 9999;
-                    background: white;
-                    padding: 10px 14px;
-                    border-radius: 6px;
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-                    font-size: 13px;
-                ">
-                    <b>HeatRisk (NWS)</b><br>
-                    {legend_rows}
-                </div>
-                """
-                m.get_root().html.add_child(folium.Element(heat_legend_html))
+                    if tornado_rows:
+                        tornado_df = pd.DataFrame(tornado_rows)
+                        tornado_df["date"] = pd.to_datetime(
+                            tornado_df["date"], errors="coerce"
+                        )
+                        tornado_df = tornado_df.sort_values("date", ascending=False)
+                        tornado_df["date"] = tornado_df["date"].dt.date.astype("string")
+                        st.markdown("**Tornado paths**")
+                        st.dataframe(tornado_df, width="stretch", hide_index=True)
 
-            if st.session_state.get("hz_heat") and heat_history_polygons:
-                heat_history_legend_html = """
-                <div style="
-                    position: fixed;
-                    bottom: 35px;
-                    left: 35px;
-                    z-index: 9999;
-                    background: white;
-                    padding: 10px 14px;
-                    border-radius: 6px;
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-                    font-size: 13px;
-                ">
-                    <b>Heat Advisory History (12 mo)</b><br>
-                    <span style="display:inline-block;width:14px;height:14px;
-                        background:#FF9800;border:1px solid #E65100;margin-right:6px;"></span>
-                    Historical advisory polygons
-                </div>
-                """
-                m.get_root().html.add_child(folium.Element(heat_history_legend_html))
+                    if swath_rows:
+                        swath_df = pd.DataFrame(swath_rows)
+                        swath_df["file_date"] = pd.to_datetime(
+                            swath_df["file_date"], errors="coerce"
+                        )
+                        swath_df = swath_df.sort_values("file_date", ascending=False)
+                        swath_df["file_date"] = swath_df["file_date"].dt.date.astype("string")
+                        st.markdown("**Hurricane wind swaths**")
+                        st.dataframe(swath_df, width="stretch", hide_index=True)
 
             nearby_zones = set()
 
@@ -960,9 +1516,6 @@ def render_disaster():
                     unsafe_allow_html=True,
                 )
 
-            if st.session_state["hz_earthquake"]:
-                enabled.append("Earthquake fault proximity")
-
             if st.session_state["hz_wind"]:
                 enabled.append("Hurricane / wind exposure")
 
@@ -972,22 +1525,13 @@ def render_disaster():
             if st.session_state.get("hz_heat"):
                 if heatrisk_summary:
                     st.markdown(
-                        f"""
-            ### Heat Risk (Screening Level)
-
-            - **HeatRisk category:** {heatrisk_summary.get('label', 'Unknown')}
-            - **Data source:** NOAA/NWS HeatRisk (experimental)
-            """
+                        load_content(
+                            "heat_present.md",
+                            heat_label=heatrisk_summary.get("label", "Unknown"),
+                        )
                     )
                 else:
-                    st.markdown(
-                        """
-            ### Heat Risk (Screening Level)
-
-            - No HeatRisk value returned for this location (NoData).
-            - HeatRisk data is time-limited; check again during active forecast windows.
-            """
-                    )
+                    st.markdown(load_content("heat_empty.md"))
 
                 if heat_alerts:
                     active_alerts = heat_alerts.get("active", [])

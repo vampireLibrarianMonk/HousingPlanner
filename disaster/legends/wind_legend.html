@@ -1,0 +1,43 @@
+<div class="leaflet-bottom leaflet-left">
+  <div class="leaflet-control leaflet-bar" style="
+      background: white;
+      padding: 10px 14px;
+      border-radius: 6px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      font-size: 13px;
+      max-width: 220px;
+      margin-bottom: 20px;
+      margin-left: 20px;
+  ">
+    <b>Wind / Hurricane Layers</b><br>
+    <span style="font-size:11px;color:#555;margin-bottom:8px;display:block;">
+        Toggle layers in map control (top right)
+    </span>
+    {swath_section}
+    {track_section}
+    {tornado_section}
+  </div>
+</div>
+
+<div class="leaflet-top leaflet-right">
+  <div class="leaflet-control leaflet-bar" style="
+      background: white;
+      padding: 8px 12px;
+      border-radius: 6px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      font-size: 12px;
+      max-width: 320px;
+      margin-top: 20px;
+      margin-right: 20px;
+  ">
+    <details open>
+      <summary style="cursor:pointer;font-weight:600;">Wind Event IDs</summary>
+      <div style="font-size:11px;color:#555;margin:4px 0 6px;">
+        Scroll to view all event IDs
+      </div>
+      <div style="max-height:240px; overflow-y:auto; padding-right:6px;">
+        {wind_event_section}
+      </div>
+    </details>
+  </div>
+</div>

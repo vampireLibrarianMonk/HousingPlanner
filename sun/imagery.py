@@ -1,5 +1,6 @@
 import io
 import math
+import time
 import requests
 from PIL import Image
 import streamlit as st
@@ -51,10 +52,23 @@ def get_static_osm_image(lat, lon, zoom=19, size=800, cache_buster=None):
             )
 
             headers = {"User-Agent": "House-Planner-Prototype/1.0"}
-            resp = requests.get(url, headers=headers, timeout=10)
-            resp.raise_for_status()
+            tile = None
+            last_error = None
 
-            tile = Image.open(io.BytesIO(resp.content))
+            for attempt in range(3):
+                try:
+                    resp = requests.get(url, headers=headers, timeout=20)
+                    resp.raise_for_status()
+                    tile = Image.open(io.BytesIO(resp.content))
+                    break
+                except requests.RequestException as exc:
+                    last_error = exc
+                    time.sleep(0.4 * (attempt + 1))
+
+            if tile is None:
+                # Skip the tile if imagery is temporarily unavailable.
+                # Leave the base image blank for this tile to avoid failing the map.
+                continue
 
             # Pixel offset of this tile relative to image origin
             paste_x = xtile * tile_size - start_x
