@@ -18,16 +18,46 @@ import streamlit as st
 st.set_page_config(page_title="House Planner (Prototype)", layout="wide")
 
 
-# Logout button in sidebar - redirects current tab to /logout
+# Logout button in sidebar - opens logout in a new tab and shows a logged-out page here
+st.session_state.setdefault("logout_requested", False)
+st.session_state.setdefault("logout_opened", False)
+
 if st.sidebar.button("🚪 Logout", width='stretch'):
-    st.components.v1.html(
+    st.session_state["logout_requested"] = True
+    st.session_state["logout_opened"] = False
+
+if st.session_state["logout_requested"]:
+    if not st.session_state["logout_opened"]:
+        st.components.v1.html(
+            """
+            <script>
+              const logoutUrl = '/logout';
+              const newTab = window.open(logoutUrl, '_blank', 'noopener');
+              if (newTab) {
+                newTab.focus();
+              }
+            </script>
+            """,
+            height=0,
+        )
+        st.session_state["logout_opened"] = True
+
+    st.markdown(
         """
-        <script>
-          window.top.location.assign('/logout');
-        </script>
+        <style>
+          section[data-testid="stSidebar"],
+          div[data-testid="stSidebar"] {
+            display: none !important;
+          }
+        </style>
         """,
-        height=0,
+        unsafe_allow_html=True,
     )
+    st.markdown("""
+    # You’re logged out
+    We opened the logout page in a new tab. You can close this tab now.
+    """)
+    st.stop()
 
 st.title("House Planner (Prototype)")
 
