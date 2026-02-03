@@ -109,6 +109,26 @@ class HousePlannerComputeStack(Stack):
             )
         )
 
+        # Allow describing instances for profile identity lookups
+        self.instance_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="DescribeWorkspaceInstances",
+                actions=["ec2:DescribeInstances", "ec2:DescribeTags"],
+                resources=["*"],
+            )
+        )
+
+        # Allow invoking Claude models via Bedrock (us-east-1 wildcard)
+        self.instance_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InvokeClaudeModels",
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=[
+                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-*"
+                ],
+            )
+        )
+
         # --------------------------------------------------
         # User Data Script
         # --------------------------------------------------
