@@ -8,8 +8,18 @@ from shapely.geometry import Point, shape
 from shapely.ops import transform
 from collections import defaultdict
 import pandas as pd
+from branca.element import MacroElement
+from jinja2 import Template
 
 from locations.logic import _get_loc_by_label
+
+from .doorprofit import (
+    fetch_crime,
+    fetch_offenders,
+    fetch_usage,
+    crime_incidents_to_features,
+    offenders_to_features,
+)
 
 from .declarations import (
     reverse_geocode_county_state,
@@ -83,6 +93,54 @@ def load_legend(filename: str, **kwargs):
     return _load_template(LEGEND_DIR / filename, **kwargs)
 
 
+def add_leaflet_legend_control(
+    m: folium.Map,
+    *,
+    html: str,
+    position: str = "bottomleft",
+    container_style: str = "",
+) -> None:
+    """Add a legend using Leaflet's control system (robust in iframes).
+
+    Using `position: fixed` inside the folium HTML root can be overridden by
+    iframe/container CSS (streamlit-folium). A proper `L.control` is reliably
+    placed by Leaflet itself.
+    """
+
+    safe_html = html.replace("`", "\\`")
+    control_style = container_style.replace("`", "\\`")
+
+    tpl = Template(
+        """
+        {% macro script(this, kwargs) %}
+        (function() {
+          var map = {{ this._parent.get_name() }};
+          var legend = L.control({position: '{{ this.position }}'});
+          legend.onAdd = function(map) {
+            var div = L.DomUtil.create('div', 'dp-legend-control');
+            div.innerHTML = `{{ this.html | safe }}`;
+            if (`{{ this.style | safe }}`) {
+              div.setAttribute('style', `{{ this.style | safe }}`);
+            }
+            // Don't steal scroll/drag.
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            return div;
+          };
+          legend.addTo(map);
+        })();
+        {% endmacro %}
+        """
+    )
+
+    el = MacroElement()
+    el._template = tpl
+    el.html = safe_html
+    el.position = position
+    el.style = control_style
+    m.add_child(el)
+
+
 def _tornado_style(feature):
     magnitude = _safe_int(feature.get("properties", {}).get("mag"))
     if magnitude is not None:
@@ -91,6 +149,169 @@ def _tornado_style(feature):
     if base:
         return {k: v for k, v in base.items() if k in {"color", "weight", "dashArray"}}
     return {"color": "#283593", "weight": 2, "dashArray": "6,4"}
+
+
+CRIME_TYPE_STYLES = {
+    "Theft": {"color": "#0D47A1", "fill": "#1565C0"},
+    "Assault": {"color": "#B71C1C", "fill": "#E53935"},
+    "Burglary": {"color": "#4A148C", "fill": "#6A1B9A"},
+    "Robbery": {"color": "#004D40", "fill": "#00897B"},
+    "Vehicle Theft": {"color": "#E65100", "fill": "#FB8C00"},
+    "Other": {"color": "#263238", "fill": "#546E7A"},
+}
+
+
+def _crime_marker_style(crime_type: str | None) -> dict:
+    if not crime_type:
+        return CRIME_TYPE_STYLES["Other"]
+    ct = str(crime_type).strip().lower()
+    if ct == "vehicle theft" or ct == "vehicle_theft":
+        return CRIME_TYPE_STYLES["Vehicle Theft"]
+    for k, v in CRIME_TYPE_STYLES.items():
+        if k.lower() == ct:
+            return v
+    return CRIME_TYPE_STYLES["Other"]
+
+
+OFFENDER_RISK_STYLES = {
+    "HIGH": {"color": "#7F0000", "fill": "#C62828"},
+    "MODERATE": {"color": "#E65100", "fill": "#EF6C00"},
+    "LOW": {"color": "#1B5E20", "fill": "#2E7D32"},
+    "NOT REPORTED": {"color": "#263238", "fill": "#546E7A"},
+    "UNKNOWN": {"color": "#263238", "fill": "#546E7A"},
+}
+
+
+def _offender_marker_style(risk_level: str | None) -> dict:
+    if not risk_level:
+        return OFFENDER_RISK_STYLES["UNKNOWN"]
+    key = str(risk_level).strip().upper()
+    return OFFENDER_RISK_STYLES.get(key) or OFFENDER_RISK_STYLES["UNKNOWN"]
+
+
+def _format_usage_datetime(value: str | None) -> str:
+    if not value:
+        return ""
+    dt = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(dt):
+        return str(value)
+    return dt.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _format_usage_percent(value: float | int | None) -> str:
+    if value is None:
+        return ""
+    try:
+        return f"{float(value):.1f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _usage_key_value_table(title: str, rows: list[dict[str, str]]) -> None:
+    if not rows:
+        return
+    st.markdown(f"**{title}**")
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
+def _usage_summary_table(title: str, payload: dict) -> None:
+    if not payload:
+        return
+    row = {
+        "Limit": payload.get("limit"),
+        "Used": payload.get("used"),
+        "Remaining": payload.get("remaining"),
+        "Percent Used": _format_usage_percent(payload.get("percentage_used")),
+        "Resets At": _format_usage_datetime(payload.get("resets_at")),
+    }
+    st.markdown(f"**{title}**")
+    st.dataframe(pd.DataFrame([row]), width="stretch", hide_index=True)
+
+
+def _render_doorprofit_usage(title: str) -> None:
+    with st.expander(title, expanded=False):
+        usage_error = st.session_state.get("doorprofit_usage_error")
+        if usage_error:
+            st.error(usage_error)
+            return
+
+        if "doorprofit_usage_json" not in st.session_state:
+            try:
+                st.session_state["doorprofit_usage_json"] = fetch_usage()
+            except Exception as exc:
+                st.session_state["doorprofit_usage_error"] = str(exc)
+                st.error(str(exc))
+                return
+
+        payload = st.session_state.get("doorprofit_usage_json") or {}
+        data = payload.get("data", {}) or {}
+
+        plan = data.get("plan") or {}
+        _usage_key_value_table(
+            "Plan",
+            [
+                {"Metric": "Name", "Value": str(plan.get("name") or "")},
+                {"Metric": "Type", "Value": str(plan.get("type") or "")},
+                {"Metric": "Monthly Price", "Value": str(plan.get("price_monthly") or "")},
+            ]
+            if plan
+            else [],
+        )
+
+        _usage_summary_table("Monthly usage", data.get("monthly") or {})
+        _usage_summary_table("Daily usage", data.get("daily") or {})
+
+        rate_limit = data.get("rate_limit") or {}
+        _usage_key_value_table(
+            "Rate limit",
+            [
+                {
+                    "Metric": "Requests per second",
+                    "Value": str(rate_limit.get("requests_per_second") or ""),
+                }
+            ]
+            if rate_limit
+            else [],
+        )
+
+        overage = data.get("overage") or {}
+        _usage_key_value_table(
+            "Overage",
+            [
+                {"Metric": "Enabled", "Value": "Yes" if overage.get("enabled") else "No"},
+                {"Metric": "Calls", "Value": str(overage.get("calls") or "0")},
+                {"Metric": "Amount due", "Value": str(overage.get("amount_due") or "")},
+                {"Metric": "Rate per call", "Value": str(overage.get("rate_per_call") or "")},
+            ]
+            if overage
+            else [],
+        )
+
+        account = data.get("account") or {}
+        _usage_key_value_table(
+            "Account",
+            [
+                {"Metric": "Status", "Value": str(account.get("status") or "")},
+                {
+                    "Metric": "Subscription status",
+                    "Value": str(account.get("subscription_status") or ""),
+                },
+                {"Metric": "Blocked", "Value": "Yes" if account.get("blocked") else "No"},
+            ]
+            if account
+            else [],
+        )
+
+        meta = payload.get("meta") or {}
+        note = meta.get("note") or ""
+        timestamp = _format_usage_datetime(meta.get("timestamp"))
+        if note or timestamp:
+            meta_parts = []
+            if note:
+                meta_parts.append(note)
+            if timestamp:
+                meta_parts.append(f"Timestamp: {timestamp}")
+            st.caption(" • ".join(meta_parts))
 
 
 def render_disaster():
@@ -129,12 +350,14 @@ def render_disaster():
                 st.checkbox("Historical disaster declarations", key="hz_disaster_history")
                 st.checkbox("FEMA repetitive loss areas (advanced risk)", key="hz_fema_rl")
                 st.checkbox("EPA Superfund sites (CERCLA)", key="hz_superfund")
+                st.checkbox("Crime incidents (DoorProfit)", key="hz_crime")
 
             with c2:
                 st.checkbox("Heat risk", key="hz_heat")
                 st.checkbox("Earthquake fault proximity", key="hz_earthquake")
                 st.checkbox("Wind exposure", key="hz_wind")
                 st.checkbox("Watersheds (USGS HUC-12)", key="hz_watershed")
+                st.checkbox("Registered sex offenders (DoorProfit)", key="hz_sex_offenders")
 
             st.divider()
 
@@ -227,6 +450,14 @@ def render_disaster():
                 st.session_state.pop("superfund_points_geojson", None)
                 st.session_state.pop("superfund_radius_key", None)
 
+            if not st.session_state.get("hz_crime"):
+                st.session_state.pop("doorprofit_crime_json", None)
+                st.session_state.pop("doorprofit_crime_radius_key", None)
+
+            if not st.session_state.get("hz_sex_offenders"):
+                st.session_state.pop("doorprofit_offenders_json", None)
+                st.session_state.pop("doorprofit_offenders_radius_key", None)
+
             # ---------------------------------------
             # Build radius-based bounding box (GIS-safe)
             # ---------------------------------------
@@ -259,6 +490,9 @@ def render_disaster():
             superfund_polygons = []
             superfund_points = []
             superfund_npl_points = []
+
+            crime_incident_rows = []
+            offender_rows = []
 
             if st.session_state.get("hz_flood"):
                 # ---------------------------------------
@@ -895,6 +1129,172 @@ def render_disaster():
                     )
 
             # ---------------------------------------
+            # DoorProfit Crime Incidents (points)
+            # ---------------------------------------
+            if st.session_state.get("hz_crime"):
+                if (
+                    "doorprofit_crime_json" not in st.session_state
+                    or st.session_state.get("doorprofit_crime_radius_key") != bbox_key
+                ):
+                    st.session_state["doorprofit_crime_json"] = fetch_crime(house.get("address") or "")
+                    st.session_state["doorprofit_crime_radius_key"] = bbox_key
+
+                crime_json = st.session_state.get("doorprofit_crime_json") or {}
+                crime_features = crime_incidents_to_features(crime_json)
+
+                # Clip to circular radius
+                to_3857 = pyproj.Transformer.from_crs(
+                    "EPSG:4326", "EPSG:3857", always_xy=True
+                ).transform
+
+                crimes_group = folium.FeatureGroup(
+                    name=f"Crime incidents [{len(crime_features)}]",
+                    show=False,
+                )
+
+                for f in crime_features:
+                    props = f.get("properties", {}) or {}
+                    coords = (f.get("geometry") or {}).get("coordinates") or []
+                    if len(coords) < 2:
+                        continue
+
+                    lng, lat = coords[0], coords[1]
+                    pt_m = transform(to_3857, Point(float(lng), float(lat)))
+                    if not pt_m.intersects(search_area):
+                        continue
+
+                    ct = props.get("type")
+                    style = _crime_marker_style(ct)
+                    tooltip_text = (
+                        f"<b>{props.get('type','Incident')}</b><br>"
+                        f"Date: {props.get('date','')}<br>"
+                        f"Distance (ft): {props.get('distance_feet','')}<br>"
+                        f"{props.get('address','')}"
+                    )
+                    folium.CircleMarker(
+                        location=[float(lat), float(lng)],
+                        radius=5,
+                        color=style["color"],
+                        fill=True,
+                        fill_color=style["fill"],
+                        fill_opacity=0.85,
+                        weight=1,
+                        tooltip=folium.Tooltip(tooltip_text),
+                    ).add_to(crimes_group)
+
+                    crime_incident_rows.append(
+                        {
+                            "type": props.get("type"),
+                            "date": props.get("date"),
+                            "address": props.get("address"),
+                            "distance_feet": props.get("distance_feet"),
+                            "lat": float(lat),
+                            "lng": float(lng),
+                        }
+                    )
+
+                if crime_incident_rows:
+                    crimes_group.add_to(m)
+                    add_leaflet_legend_control(
+                        m,
+                        html=load_legend("crime_legend.html"),
+                        position="bottomleft",
+                        container_style=(
+                            "background: white; padding: 10px 14px; border-radius: 6px; "
+                            "box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-size: 13px; "
+                            "max-width: 260px; pointer-events: none;"
+                        ),
+                    )
+
+            # ---------------------------------------
+            # DoorProfit Registered Sex Offenders (points)
+            # ---------------------------------------
+            if st.session_state.get("hz_sex_offenders"):
+                if (
+                    "doorprofit_offenders_json" not in st.session_state
+                    or st.session_state.get("doorprofit_offenders_radius_key") != bbox_key
+                ):
+                    st.session_state["doorprofit_offenders_json"] = fetch_offenders(house.get("address") or "")
+                    st.session_state["doorprofit_offenders_radius_key"] = bbox_key
+
+                offenders_json = st.session_state.get("doorprofit_offenders_json") or {}
+                offender_features = offenders_to_features(offenders_json)
+
+                to_3857 = pyproj.Transformer.from_crs(
+                    "EPSG:4326", "EPSG:3857", always_xy=True
+                ).transform
+
+                offenders_group = folium.FeatureGroup(
+                    name=f"Sex offenders [{len(offender_features)}]",
+                    show=False,
+                )
+
+                for f in offender_features:
+                    props = f.get("properties", {}) or {}
+                    coords = (f.get("geometry") or {}).get("coordinates") or []
+                    if len(coords) < 2:
+                        continue
+                    lng, lat = coords[0], coords[1]
+                    pt_m = transform(to_3857, Point(float(lng), float(lat)))
+                    if not pt_m.intersects(search_area):
+                        continue
+
+                    risk = props.get("risk_level")
+                    style = _offender_marker_style(risk)
+
+                    tooltip_text = (
+                        f"<b>{props.get('name','Offender')}</b><br>"
+                        f"Risk: {props.get('risk_level','Unknown')}<br>"
+                        f"Distance (mi): {props.get('distance','')}<br>"
+                        f"{props.get('address','')}, {props.get('city','') or ''} {props.get('state','') or ''} {props.get('zipcode','') or ''}"
+                    )
+                    folium.CircleMarker(
+                        location=[float(lat), float(lng)],
+                        radius=6,
+                        color=style["color"],
+                        fill=True,
+                        fill_color=style["fill"],
+                        fill_opacity=0.85,
+                        weight=1,
+                        tooltip=folium.Tooltip(tooltip_text),
+                    ).add_to(offenders_group)
+
+                    offender_rows.append(
+                        {
+                            "name": props.get("name"),
+                            "risk_level": props.get("risk_level"),
+                            "distance_mi": props.get("distance"),
+                            "address": ", ".join(
+                                [
+                                    str(props.get("address") or "").strip(),
+                                    str(props.get("city") or "").strip(),
+                                    str(props.get("state") or "").strip(),
+                                    str(props.get("zipcode") or "").strip(),
+                                ]
+                            ).replace(" ,", ",").strip(", "),
+                            "gender": props.get("gender"),
+                            "age": props.get("age"),
+                            "dob": props.get("dob"),
+                            "source_url": props.get("source_url"),
+                            "lat": float(lat),
+                            "lng": float(lng),
+                        }
+                    )
+
+                if offender_rows:
+                    offenders_group.add_to(m)
+                    add_leaflet_legend_control(
+                        m,
+                        html=load_legend("sex_offender_legend.html"),
+                        position="bottomleft",
+                        container_style=(
+                            "background: white; padding: 10px 14px; border-radius: 6px; "
+                            "box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-size: 13px; "
+                            "max-width: 260px; pointer-events: none;"
+                        ),
+                    )
+
+            # ---------------------------------------
             # Heat Risk (NOAA HeatRisk ImageServer)
             # ---------------------------------------
             heatrisk_summary = None
@@ -1214,6 +1614,40 @@ def render_disaster():
                             radius_miles=radius_miles,
                         )
                     )
+
+            # ---------------------------------------
+            # DoorProfit Tables
+            # ---------------------------------------
+            if st.session_state.get("hz_crime"):
+                st.markdown("#### Crime incidents")
+                if crime_incident_rows:
+                    crime_df = pd.DataFrame(crime_incident_rows)
+                    if "date" in crime_df.columns:
+                        crime_df["date"] = pd.to_datetime(crime_df["date"], errors="coerce")
+                        crime_df = crime_df.sort_values("date", ascending=False)
+                        crime_df["date"] = crime_df["date"].dt.date.astype("string")
+                    st.dataframe(crime_df, width="stretch", height=260, hide_index=True)
+                else:
+                    st.caption("No incidents returned within this search radius.")
+                _render_doorprofit_usage("DoorProfit API usage (/v1/usage) — Crime")
+
+            if st.session_state.get("hz_sex_offenders"):
+                st.markdown("#### Registered sex offenders")
+                if offender_rows:
+                    offenders_df = pd.DataFrame(offender_rows)
+                    # Group/Sort: highest risk first, then closest.
+                    risk_order = {"HIGH": 0, "MODERATE": 1, "LOW": 2, "NOT REPORTED": 3}
+                    offenders_df["risk_sort"] = (
+                        offenders_df["risk_level"].astype(str).str.upper().map(risk_order).fillna(9)
+                    )
+                    if "distance_mi" in offenders_df.columns:
+                        offenders_df["distance_mi"] = pd.to_numeric(offenders_df["distance_mi"], errors="coerce")
+                    offenders_df = offenders_df.sort_values(["risk_sort", "distance_mi"], ascending=[True, True])
+                    offenders_df.drop(columns=["risk_sort"], inplace=True, errors="ignore")
+                    st.dataframe(offenders_df, width="stretch", height=260, hide_index=True)
+                else:
+                    st.caption("No offenders returned within this search radius.")
+                _render_doorprofit_usage("DoorProfit API usage (/v1/usage) — Sex offenders")
 
             if st.session_state.get("hz_wildfire"):
                 if wildfire_features:

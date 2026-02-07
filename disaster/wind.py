@@ -25,13 +25,24 @@ import pyproj
 ASCE_HAZARD_API_URL = "https://api-hazard.asce.org/v1/wind"
 ASCE_TOKEN_ENV = "ASCE_HAZARD_API_TOKEN"
 
+try:
+    from streamlit.errors import StreamlitSecretNotFoundError
+except Exception:  # pragma: no cover
+    StreamlitSecretNotFoundError = Exception  # type: ignore
+
 
 def fetch_asce_design_wind(lat: float, lon: float):
     """
     Licensed ASCE Hazard Tool access (optional).
     Returns None unless user supplies a valid token.
     """
-    token = st.secrets.get(ASCE_TOKEN_ENV, None) or os.getenv(ASCE_TOKEN_ENV)
+    try:
+        token = st.secrets.get(ASCE_TOKEN_ENV, None)
+    except StreamlitSecretNotFoundError:
+        token = None
+    except Exception:
+        token = None
+    token = token or os.getenv(ASCE_TOKEN_ENV)
     if not token:
         return None
 

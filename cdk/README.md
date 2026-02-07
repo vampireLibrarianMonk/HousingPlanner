@@ -64,6 +64,13 @@ aws secretsmanager create-secret \
   --secret-string "AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
+```bash
+aws secretsmanager create-secret \
+  --name houseplanner/door_profit_api_key \
+  --description "DoorProfit API key for crime + sex offender overlays" \
+  --secret-string "dp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
 # 2. Get and store your ip address
 ```bash
 export MY_PUBLIC_IP=$(curl -s https://checkip.amazonaws.com)/32

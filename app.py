@@ -1,8 +1,15 @@
 # ---------------------------------------------
 # Global state
 # ---------------------------------------------
+from dotenv import load_dotenv
+
 from state import init_state
 from profile.storage import ensure_profiles_dir
+
+# Load local environment variables for development (does not override existing env)
+#
+# Production deployments typically inject env vars via systemd or another mechanism.
+load_dotenv(override=False)
 
 ensure_profiles_dir()
 init_state()
@@ -97,6 +104,13 @@ render_locations()
 from commute.ui import render_commute
 
 render_commute()
+
+# =============================
+# Neighborhood Analysis
+# =============================
+from neighborhood.ui import render_neighborhood
+
+render_neighborhood()
 
 # =============================
 # Sun & Light Analysis
