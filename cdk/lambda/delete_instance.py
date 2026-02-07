@@ -23,6 +23,8 @@ logger.setLevel(logging.INFO)
 ec2 = boto3.client("ec2")
 elbv2 = boto3.client("elbv2")
 cognito = boto3.client("cognito-idp")
+ssm = boto3.client("ssm")
+s3 = boto3.client("s3")
 
 # Cache the listener ARN to avoid repeated API calls
 _cached_listener_arn = None
@@ -116,6 +118,32 @@ def _routing_cookie_name(user_sub: str) -> str:
     """
     suffix = hashlib.sha1(user_sub.encode()).hexdigest()[:12]
     return f"hp_route_{suffix}"
+
+
+def _bucket_prefix() -> str:
+    param_arn = os.environ["STORAGE_BUCKET_PREFIX_PARAM"]
+    response = ssm.get_parameter(Name=param_arn)
+    return response["Parameter"]["Value"]
+
+
+def _bucket_name_for_user(user_sub: str) -> str:
+    prefix = _bucket_prefix()
+    return f"{prefix}-{user_sub}".lower()
+
+
+def _purge_and_delete_bucket(bucket_name: str) -> None:
+    paginator = s3.get_paginator("list_object_versions")
+    delete_items = []
+    for page in paginator.paginate(Bucket=bucket_name):
+        for version in page.get("Versions", []):
+            delete_items.append({"Key": version["Key"], "VersionId": version["VersionId"]})
+        for marker in page.get("DeleteMarkers", []):
+            delete_items.append({"Key": marker["Key"], "VersionId": marker["VersionId"]})
+        if delete_items:
+            s3.delete_objects(Bucket=bucket_name, Delete={"Objects": delete_items})
+            delete_items = []
+
+    s3.delete_bucket(Bucket=bucket_name)
 
 
 def lambda_handler(event, context):
@@ -220,6 +248,16 @@ def lambda_handler(event, context):
         logger.error("Error deleting target group: %s", e)
 
     logger.info("Cleanup complete for user_sub: %s", user_sub)
+
+    # ---------- Delete per-user S3 bucket ----------
+    bucket_name = _bucket_name_for_user(user_sub)
+    try:
+        _purge_and_delete_bucket(bucket_name)
+        logger.info("Deleted user bucket: %s", bucket_name)
+    except s3.exceptions.NoSuchBucket:
+        logger.info("User bucket not found: %s", bucket_name)
+    except Exception as e:
+        logger.error("Error deleting user bucket %s: %s", bucket_name, e)
     
     # Return the original event for Cognito triggers
     return event

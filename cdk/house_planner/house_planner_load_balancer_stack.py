@@ -53,6 +53,7 @@ class HousePlannerLoadBalancerStack(Stack):
         launch_template_id: str,
         hosted_zone_name: str,
         app_domain_name: str,
+        storage_bucket_prefix_param: str,
         **kwargs,
     ) -> None:
         """
@@ -68,6 +69,9 @@ class HousePlannerLoadBalancerStack(Stack):
         :param app_domain_name: Full app domain (e.g. app.housing-planner.com)
         """
         super().__init__(scope, construct_id, **kwargs)
+
+        bucket_prefix = f"houseplanner-{self.account}"
+        bucket_arn_pattern = f"arn:aws:s3:::{bucket_prefix}-*"
 
         # --------------------------------------------------
         # Application Load Balancer
@@ -122,6 +126,7 @@ class HousePlannerLoadBalancerStack(Stack):
                 "VPC_ID": vpc.vpc_id,
                 "ALB_ARN": self.alb.load_balancer_arn,
                 "EC2_SECURITY_GROUP_ID": ec2_security_group.security_group_id,
+                "STORAGE_BUCKET_PREFIX_PARAM": storage_bucket_prefix_param,
                 # OIDC config for creating authenticated user rules
                 "OIDC_ISSUER": oidc_issuer,
                 "OIDC_AUTH_ENDPOINT": oidc_auth_endpoint,
@@ -143,6 +148,41 @@ class HousePlannerLoadBalancerStack(Stack):
                     "ec2:CreateTags",
                 ],
                 resources=["*"],
+            )
+        )
+
+        self.ensure_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="S3UserBucketProvisioning",
+                actions=[
+                    "s3:CreateBucket",
+                    "s3:PutBucketTagging",
+                    "s3:PutBucketEncryption",
+                    "s3:PutBucketPublicAccessBlock",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                resources=["*"],
+            )
+        )
+
+        self.ensure_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="S3UserBucketOperations",
+                actions=[
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:GetObject",
+                ],
+                resources=[f"{bucket_arn_pattern}/*"],
+            )
+        )
+
+        self.ensure_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="StorageBucketPrefixLookup",
+                actions=["ssm:GetParameter"],
+                resources=[storage_bucket_prefix_param],
             )
         )
 

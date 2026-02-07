@@ -9,6 +9,8 @@ User=ec2-user
 Group=ec2-user
 WorkingDirectory=/home/ec2-user/HousingPlanner
 Environment="AWS_DEFAULT_REGION=us-east-1"
+Environment="STORAGE_BUCKET_PREFIX=__STORAGE_BUCKET_PREFIX__"
+Environment="STORAGE_BUCKET_PREFIX_PARAM=__STORAGE_BUCKET_PREFIX_PARAM__"
 # Pull latest code on every start (keeps instance up-to-date after restarts)
 ExecStartPre=/bin/bash -c 'cd /home/ec2-user/HousingPlanner && git pull --ff-only'
 # Fetch API keys from Secrets Manager

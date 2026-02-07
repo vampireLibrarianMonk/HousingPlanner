@@ -25,6 +25,7 @@ import aws_cdk as cdk
 from house_planner.house_planner_network_stack import HousePlannerNetworkStack
 from house_planner.house_planner_cognito_stack import HousePlannerCognitoStack
 from house_planner.house_planner_compute_stack import HousePlannerComputeStack
+from house_planner.house_planner_storage_stack import HousePlannerStorageStack
 from house_planner.house_planner_load_balancer_stack import HousePlannerLoadBalancerStack
 from house_planner.house_planner_cloud_front_stack import HousePlannerCloudFrontStack
 from house_planner.house_planner_cleanup_stack import HousePlannerCleanupStack
@@ -92,6 +93,18 @@ compute_stack.add_dependency(network_stack)
 compute_stack.add_dependency(cognito_stack)
 
 # --------------------------------------------------
+# Stack 3b: Storage (per-user buckets)
+# --------------------------------------------------
+storage_stack = HousePlannerStorageStack(
+    app,
+    "HousePlannerStorageStack",
+    env=default_env,
+    description="Per-user storage metadata for House Planner",
+)
+storage_stack.add_dependency(network_stack)
+storage_stack.add_dependency(cognito_stack)
+
+# --------------------------------------------------
 # Stack 4: Load Balancer + Provisioning
 # --------------------------------------------------
 # This stack includes:
@@ -113,11 +126,13 @@ load_balancer_stack = HousePlannerLoadBalancerStack(
     launch_template_id=compute_stack.launch_template_id,
     hosted_zone_name=HOSTED_ZONE_NAME,
     app_domain_name=APP_DOMAIN_NAME,
+    storage_bucket_prefix_param=storage_stack.prefix_param.parameter_arn,
     description="ALB with Cognito OIDC and ensure-instance Lambda for House Planner",
 )
 load_balancer_stack.add_dependency(network_stack)
 load_balancer_stack.add_dependency(cognito_stack)
 load_balancer_stack.add_dependency(compute_stack)
+load_balancer_stack.add_dependency(storage_stack)
 
 # --------------------------------------------------
 # Stack 5: CloudFront Edge (us-east-1)
@@ -141,6 +156,7 @@ cleanup_stack = HousePlannerCleanupStack(
     env=default_env,
     alb_arn=load_balancer_stack.alb_arn,
     user_pool_id=cognito_stack.user_pool_id,
+    storage_bucket_prefix_param=storage_stack.prefix_param.parameter_arn,
     description="EventBridge-triggered cleanup when users are deleted",
 )
 cleanup_stack.add_dependency(cognito_stack)

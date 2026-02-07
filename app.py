@@ -2,6 +2,7 @@
 # Global state
 # ---------------------------------------------
 from dotenv import load_dotenv
+from pathlib import Path
 
 from state import init_state
 from profile.storage import ensure_profiles_dir
@@ -10,6 +11,7 @@ from profile.storage import ensure_profiles_dir
 #
 # Production deployments typically inject env vars via systemd or another mechanism.
 load_dotenv(override=False)
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
 ensure_profiles_dir()
 init_state()
@@ -72,8 +74,14 @@ st.title("House Planner (Prototype)")
 # Home Buying Checklist & Notes
 # =============================
 from assistant.ui import render_checklist_and_notes, render_floating_chatbot
+from hoa.ui import render_document_vetting
 
 render_checklist_and_notes()
+
+# =============================
+# Document Vetting
+# =============================
+render_document_vetting()
 
 # -----------------------------
 # Safe defaults for section badges

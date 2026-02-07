@@ -1,165 +1,119 @@
-# House Planner — DNS & HTTPS Setup (Minimal)
+# House Planner CDK Deployment
 
-This project uses **Route53 + CloudFront + ACM** to expose a secure browser page that starts the EC2-backed Streamlit app.
+This document covers infrastructure deployment only. It does not include local app usage.
 
-This document lists **only what is required**, in the **correct order**.
+## Prerequisites
 
----
+- AWS CLI configured for the target account
+- AWS CDK installed and bootstrapped for the account/region
+- A registered domain in Route 53 or delegated to Route 53
+- Python 3.12 and a virtual environment
 
-## What You Must Create First (One-Time)
+## Configure Domains
 
-### Option A (Recommended): Register the domain in Route 53
-
-1. Go to **Route 53 → Registered domains**
-2. Click **Register domain**
-3. Register your domain (e.g. `yourdomain.com`)
-
-AWS will automatically:
-- Create the public hosted zone
-- Configure nameservers
-- Attach the domain to Route 53 DNS
-
-No additional DNS setup is required.
-
----
-
-### Option B: Use an external registrar (not recommended)
-
-If your domain is registered outside AWS:
-
-1. Create a **public hosted zone** in Route 53 for `yourdomain.com`
-2. Copy the hosted zone **NS (nameserver)** records
-3. Update the domain’s nameservers at your registrar
-4. Wait for DNS propagation
-
----
-
-## What You Configure in CDK (Before Deploy)
-
-Edit `cdk/house_planner/stack.py`:
+Edit `app/cdk/app.py` and set the domain values:
 
 ```python
 domain_name = "planner.yourdomain.com"
 hosted_zone_name = "yourdomain.com"
 ```
 
-These values **must match** the hosted zone you created.
+## Secrets Manager
 
----
+Create the required secrets:
 
-## Deploy Order
-
-# 1. Deploy Open Route Service (ORS) and Google Maps API keys to Secrets Manager
 ```bash
 aws secretsmanager create-secret \
   --name houseplanner/ors_api_key \
   --description "OpenRouteService API key for HousePlanner" \
-  --secret-string "5b3ce3597851110001cf6248xxxxxxxxxxxxxxxx"
+  --secret-string "<ors-api-key>"
 ```
 
 ```bash
 aws secretsmanager create-secret \
   --name houseplanner/google_maps_api_key \
   --description "Google Maps Routes API key for HousePlanner" \
-  --secret-string "AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  --secret-string "<google-maps-key>"
 ```
 
 ```bash
 aws secretsmanager create-secret \
   --name houseplanner/door_profit_api_key \
   --description "DoorProfit API key for crime + sex offender overlays" \
-  --secret-string "dp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  --secret-string "<door-profit-key>"
 ```
 
-# 2. Get and store your ip address
+## Deployment Steps
+
+1) Export required deployment variables:
+
 ```bash
 export MY_PUBLIC_IP=$(curl -s https://checkip.amazonaws.com)/32
-echo $MY_PUBLIC_IP
-```
-
-# 3. Get and store the cloudfront prefix list
-```bash
-export CLOUDFRONT_PL_ID=$(
+echo ${MY_PUBLIC_IP}
+export CLOUDFRONT_PL_ID=$(\
   aws ec2 describe-managed-prefix-lists \
     --query "PrefixLists[?PrefixListName=='com.amazonaws.global.cloudfront.origin-facing'].PrefixListId" \
     --output text
 )
-echo "$CLOUDFRONT_PL_ID"
+echo ${CLOUDFRONT_PL_ID}
 ```
 
+2) Prepare the CDK context qualifier:
 
-# 4. Create and insert the qualifier
 ```bash
-QUALIFIER=$(git remote get-url origin | tr -d '\n' | sha256sum | cut -c1-10); \
+QUALIFIER=$(git remote get-url origin | tr -d '\n' | sha256sum | cut -c1-10)
 jq --arg q "$QUALIFIER" '.context["@aws-cdk/core:bootstrapQualifier"]=$q' cdk.json > cdk.json.tmp && mv cdk.json.tmp cdk.json
 ```
 
-# 5. Create a key pair for administering the ec2 instance
+3) Create the EC2 key pair:
+
 ```bash
 aws ec2 create-key-pair \
   --key-name houseplanner-key \
   --query 'KeyMaterial' \
   --output text > houseplanner-key.pem
-
 chmod 400 houseplanner-key.pem
 ```
 
-# 6. Activate the virtual environment and install the python libraries
+4) Install CDK Python dependencies:
+
 ```bash
 source .venv/bin/activate
-pip install -r requirements
+pip install -r requirements.txt
 ```
 
-# 7. Clean old context (important)
+5) Clean old context:
+
 ```bash
 cdk context --clear
 rm -rf cdk.out
 ```
 
-# 8. Bootstrap (now works)
+6) Bootstrap CDK:
+
 ```bash
 cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/us-east-1
 ```
 
-# 9. Synth
+7) Synthesize and deploy:
+
 ```bash
 cdk synth
-```
-
-# 10. Deploy
-```bash
 cdk deploy --all \
   -c ssh_cidr="$MY_PUBLIC_IP" \
   -c cloudfront_pl_id="$CLOUDFRONT_PL_ID"
 ```
 
-CDK will automatically:
-- Request an ACM certificate (us-east-1)
-- Validate it via Route53 DNS
-- Create a CloudFront distribution
-- Create a Route53 alias record: `planner.yourdomain.com → CloudFront`
-- Expose the HTTPS status/start page
-
----
-
 ## After Deployment
 
-Visit:
+Open the application status page:
 
 ```
 https://planner.yourdomain.com
 ```
 
-You should see:
-- Application status
-- A button to start the EC2 instance
-- A link to the Streamlit app once EC2 is running
+The page exposes:
 
----
-
-## Notes
-
-- You **must** create the Route53 hosted zone **before** running CDK
-- ACM certificate creation will fail if DNS is not delegated correctly
-- No ALB, no ECS, no containers are involved
-- EC2 and Streamlit are unchanged by DNS/HTTPS setup
+- Instance status
+- A start button for the EC2 workspace
+- A link to the Streamlit app

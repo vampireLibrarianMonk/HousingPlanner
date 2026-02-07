@@ -11,6 +11,8 @@ logger.setLevel(logging.INFO)
 ec2 = boto3.client("ec2")
 elbv2 = boto3.client("elbv2")
 secretsmanager = boto3.client("secretsmanager")
+ssm = boto3.client("ssm")
+s3 = boto3.client("s3")
 
 # Cache values to avoid repeated API calls
 _cached_listener_arn = None
@@ -30,6 +32,67 @@ def _get_client_secret() -> str:
     resp = secretsmanager.get_secret_value(SecretId=secret_arn)
     _cached_client_secret = resp["SecretString"]
     return _cached_client_secret
+
+
+def _bucket_prefix() -> str:
+    param_arn = os.environ["STORAGE_BUCKET_PREFIX_PARAM"]
+    response = ssm.get_parameter(Name=param_arn)
+    return response["Parameter"]["Value"]
+
+
+def _bucket_name_for_user(user_sub: str) -> str:
+    prefix = _bucket_prefix()
+    return f"{prefix}-{user_sub}".lower()
+
+
+def _ensure_user_bucket(user_sub: str) -> str:
+    bucket_name = _bucket_name_for_user(user_sub)
+    try:
+        s3.head_bucket(Bucket=bucket_name)
+        return bucket_name
+    except Exception:
+        pass
+
+    region = s3.meta.region_name or os.environ.get("AWS_REGION")
+    if region and region != "us-east-1":
+        s3.create_bucket(
+            Bucket=bucket_name,
+            CreateBucketConfiguration={"LocationConstraint": region},
+        )
+    else:
+        s3.create_bucket(Bucket=bucket_name)
+    s3.put_bucket_encryption(
+        Bucket=bucket_name,
+        ServerSideEncryptionConfiguration={
+            "Rules": [
+                {
+                    "ApplyServerSideEncryptionByDefault": {
+                        "SSEAlgorithm": "AES256",
+                    }
+                }
+            ]
+        },
+    )
+    s3.put_public_access_block(
+        Bucket=bucket_name,
+        PublicAccessBlockConfiguration={
+            "BlockPublicAcls": True,
+            "IgnorePublicAcls": True,
+            "BlockPublicPolicy": True,
+            "RestrictPublicBuckets": True,
+        },
+    )
+    s3.put_bucket_tagging(
+        Bucket=bucket_name,
+        Tagging={
+            "TagSet": [
+                {"Key": "OwnerSub", "Value": user_sub},
+                {"Key": "Purpose", "Value": "HousePlannerUser"},
+                {"Key": "App", "Value": "HousePlanner"},
+            ]
+        },
+    )
+    return bucket_name
 
 
 def _get_https_listener_arn(alb_arn: str) -> str:
@@ -276,6 +339,9 @@ def lambda_handler(event, context):
     cookie_name = _routing_cookie_name(user_sub)
     # Set cookie with long expiry, secure, httponly, and SameSite=Lax for redirect compatibility
     set_cookie = f"{cookie_name}=1; Path=/; Max-Age=31536000; Secure; HttpOnly; SameSite=Lax"
+
+    # Ensure user bucket exists
+    _ensure_user_bucket(user_sub)
 
     # 2) Find an existing instance (prefer running/pending)
     resp = ec2.describe_instances(

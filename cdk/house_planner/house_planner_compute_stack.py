@@ -129,6 +129,46 @@ class HousePlannerComputeStack(Stack):
             )
         )
 
+        # Allow Textract for PDF text extraction
+        self.instance_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="TextractDocumentText",
+                actions=[
+                    "textract:StartDocumentTextDetection",
+                    "textract:GetDocumentTextDetection",
+                    "textract:DetectDocumentText",
+                ],
+                resources=["*"],
+            )
+        )
+
+        bucket_prefix = f"houseplanner-{self.account}"
+        bucket_arn_pattern = f"arn:aws:s3:::{bucket_prefix}-*"
+
+        self.instance_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="UserBucketAccess",
+                actions=[
+                    "s3:PutObject",
+                    "s3:GetObject",
+                    "s3:DeleteObject",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                resources=[bucket_arn_pattern, f"{bucket_arn_pattern}/*"],
+            )
+        )
+
+        self.instance_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="StorageBucketPrefixLookup",
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter/houseplanner/storage/bucket_prefix"
+                ],
+            )
+        )
+
         # --------------------------------------------------
         # User Data Script
         # --------------------------------------------------
@@ -138,6 +178,7 @@ class HousePlannerComputeStack(Stack):
             "set -euxo pipefail",
             "",
             "echo '===== [BOOT] Cloud-init starting ====='",
+            f"STORAGE_BUCKET_PREFIX=houseplanner-{self.account}",
             "",
             "# ------------------------------------------------------------",
             "# Ensure ec2-user exists and owns its home",
@@ -343,6 +384,10 @@ class HousePlannerComputeStack(Stack):
             "",
             "# Update the service file with the app domain",
             f"sed -i 's/--browser.serverPort=443/--browser.serverAddress={app_domain_name} --browser.serverPort=443/' /etc/systemd/system/streamlit.service",
+            "# Inject storage bucket prefix into the service env",
+            "sed -i 's/__STORAGE_BUCKET_PREFIX__/${STORAGE_BUCKET_PREFIX}/' /etc/systemd/system/streamlit.service",
+            "# Inject storage bucket prefix param ARN for SSM fallback",
+            f"sed -i 's#__STORAGE_BUCKET_PREFIX_PARAM__#arn:aws:ssm:{self.region}:{self.account}:parameter/houseplanner/storage/bucket_prefix#' /etc/systemd/system/streamlit.service",
             "",
             "systemctl daemon-reload",
             "systemctl enable streamlit.service",
