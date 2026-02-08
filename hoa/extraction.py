@@ -47,6 +47,22 @@ def start_textract_job(
     return response["JobId"], key
 
 
+def start_textract_job_for_s3_key(
+    s3_key: str,
+    *,
+    region_name: str | None = None,
+    bucket_name: str | None = None,
+) -> str:
+    """Start Textract job for an existing S3 object. Returns job_id."""
+    if not bucket_name:
+        raise ValueError("bucket_name is required for Textract PDF processing")
+    client = boto3.client("textract", region_name=region_name)
+    response = client.start_document_text_detection(
+        DocumentLocation={"S3Object": {"Bucket": bucket_name, "Name": s3_key}},
+    )
+    return response["JobId"]
+
+
 def poll_textract_job(
     job_id: str,
     *,

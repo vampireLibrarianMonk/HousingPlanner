@@ -34,6 +34,12 @@ def extract_profile() -> Dict[str, Any]:
             "include_flags": st.session_state.get("mortgage_include_flags", {}),
             "custom_expenses_log": list(st.session_state.get("custom_expenses_log", [])),
             "take_home_log": list(st.session_state.get("take_home_log", [])),
+            "cost_records": st.session_state.get("mortgage_cost_records", []),
+            "inference_profile": st.session_state.get("mortgage_inference_profile"),
+        },
+        "hoa": {
+            "cost_records": st.session_state.get("hoa_cost_records", []),
+            "inference_profile": st.session_state.get("hoa_inference_profile"),
         },
     }
 
@@ -57,5 +63,12 @@ def apply_profile(profile: Dict[str, Any]) -> None:
 
     st.session_state["custom_expenses_log"] = mortgage.get("custom_expenses_log", [])
     st.session_state["take_home_log"] = mortgage.get("take_home_log", [])
+    st.session_state["mortgage_cost_records"] = mortgage.get("cost_records", [])
+    st.session_state["mortgage_inference_profile"] = mortgage.get("inference_profile")
 
     st.session_state["mortgage_expanded"] = True
+
+    hoa = profile.get("hoa", {})
+    if hoa:
+        st.session_state["hoa_cost_records"] = hoa.get("cost_records", [])
+        st.session_state["hoa_inference_profile"] = hoa.get("inference_profile")

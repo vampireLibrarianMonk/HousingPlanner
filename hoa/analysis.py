@@ -61,6 +61,49 @@ def _build_analysis_prompt(document_text: str) -> str:
     )
 
 
+def _build_green_analysis_prompt(document_text: str) -> str:
+    return (
+        "You are an HOA covenant vetting assistant. Your purpose is to surface favorable, homeowner-friendly "
+        "provisions for decision support. Use only the provided document text and do not add outside knowledge.\n\n"
+        "Objective\n"
+        "Review this document and identify any clauses that are favorable to homeowners, limit HOA discretion, "
+        "cap financial exposure, protect owner rights, or preserve flexibility for use, resale, or rental. "
+        "Quote the exact language, explain why each item is a positive or protective feature, and categorize "
+        "the benefit (financial, lifestyle, governance, resale). Do not infer benefits not explicitly stated.\n\n"
+        "Green-Flag Categories and Checks\n"
+        "- Financial protections: Identify any limits on fee increases, caps on special assessments, notice "
+        "requirements, or protections against liens or fines.\n"
+        "- Use & flexibility: Highlight language that permits rentals, home offices, reasonable architectural "
+        "changes, pets, or parking with minimal approval burden.\n"
+        "- Governance & owner rights: Find clauses that require owner votes for rule changes, provide appeal rights, "
+        "require due process, or restrict arbitrary enforcement.\n\n"
+        "Safety / scope guardrail\n"
+        "Base all findings strictly on the document text. Do not provide legal advice or assume protections beyond "
+        "what is stated.\n\n"
+        "Return ONLY valid JSON with this exact shape (no extra text, no markdown, no backticks):\n"
+        "{\n"
+        "  \"executive_summary\": {\n"
+        "    \"overall_support\": \"low|medium|high\",\n"
+        "    \"summary\": \"...\"\n"
+        "  },\n"
+        "  \"benefits\": [\n"
+        "    {\n"
+        "      \"category\": \"financial|lifestyle|governance|resale\",\n"
+        "      \"strength\": \"low|medium|high\",\n"
+        "      \"confidence\": \"explicit|inferred\",\n"
+        "      \"title\": \"short title\",\n"
+        "      \"quoted_text\": \"exact clause snippet\",\n"
+        "      \"page_numbers\": [1,2],\n"
+        "      \"explanation\": \"why this is beneficial\"\n"
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "If no benefits are found, return an empty benefits array and still include the executive_summary.\n\n"
+        "Document text follows:\n"
+        f"{document_text}"
+    )
+
+
 def _build_qa_prompt(document_text: str, question: str, document_name: str) -> str:
     return (
         "You answer questions about an HOA document. Only use the provided text. "
@@ -214,6 +257,85 @@ def analyze_document_chunked(
     )
 
 
+def analyze_document_chunked_green(
+    pages: Iterable[str],
+    *,
+    model_id: str,
+    region_name: str | None = None,
+    max_pages_per_chunk: int = 12,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> AnalysisResult:
+    """Run green-flag analysis over paginated text, merge results into a single summary."""
+    chunks: List[str] = []
+    current: List[str] = []
+    for idx, page_text in enumerate(pages, start=1):
+        current.append(f"--- Page {idx} ---\n{page_text}")
+        if idx % max_pages_per_chunk == 0:
+            chunks.append("\n\n".join(current))
+            current = []
+    if current:
+        chunks.append("\n\n".join(current))
+
+    summaries: List[str] = []
+    all_benefits: List[Dict[str, Any]] = []
+    support_values: List[str] = []
+    failed_chunks = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    total_chunks = len(chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        if on_progress:
+            on_progress(index, total_chunks)
+        response = invoke_bedrock_json(
+            _build_green_analysis_prompt(chunk),
+            model_id=model_id,
+            region_name=region_name,
+        )
+        raw = response.get("raw", "")
+        usage = response.get("usage", {})
+        if usage.get("input_tokens"):
+            total_input_tokens += int(usage["input_tokens"])
+        if usage.get("output_tokens"):
+            total_output_tokens += int(usage["output_tokens"])
+        structured = _try_extract_json(raw)
+        if structured:
+            summary = structured.get("executive_summary", {})
+            summary_text = summary.get("summary")
+            if summary_text:
+                summaries.append(summary_text)
+            support = summary.get("overall_support")
+            if support:
+                support_values.append(support)
+            all_benefits.extend(structured.get("benefits", []))
+        else:
+            failed_chunks += 1
+
+    summary_text = _merge_summaries(summaries)
+    if failed_chunks:
+        summary_text = " ".join(
+            [
+                summary_text,
+                f"(Note: {failed_chunks} chunk(s) could not be parsed and may be underrepresented.)",
+            ]
+        ).strip()
+
+    merged = {
+        "executive_summary": {
+            "overall_support": _merge_strictness(support_values),
+            "summary": summary_text,
+        },
+        "benefits": _dedupe_flags(all_benefits),
+    }
+    markdown = _build_green_markdown(merged, json.dumps(merged, indent=2))
+    return AnalysisResult(
+        structured=merged,
+        markdown=markdown,
+        input_tokens=total_input_tokens or None,
+        output_tokens=total_output_tokens or None,
+    )
+
+
 def answer_question(
     document_text: str,
     question: str,
@@ -302,6 +424,55 @@ def _build_markdown(structured: Dict[str, Any], raw: str) -> str:
             explanation = flag.get("explanation", "")
             lines.append(
                 f"- **{title}** ({category}, {severity}, {confidence}) — pages {pages}\n"
+                f"  - _{quoted}_\n  - {explanation}"
+            )
+
+    lines.append(
+        "\n_This analysis is informational only and not legal advice. Consult a qualified professional for legal guidance._"
+    )
+    return "\n".join(lines)
+
+
+def _build_green_markdown(structured: Dict[str, Any], raw: str) -> str:
+    if not structured:
+        raw_block = "\n".join([
+            "```",
+            raw.strip(),
+            "```",
+        ])
+        return "".join(
+            [
+                "### Executive Overview\n",
+                "- Analysis output was not valid JSON.\n\n",
+                "### Raw Output\n",
+                raw_block,
+                "\n\n",
+                "_This analysis is informational only and not legal advice. Consult a qualified professional for legal guidance._",
+            ]
+        )
+
+    summary = structured.get("executive_summary", {})
+    benefits = structured.get("benefits", [])
+
+    lines = ["### Executive Overview"]
+    support = summary.get("overall_support", "—")
+    summary_text = summary.get("summary", "")
+    lines.append(f"- **Overall support:** {support}")
+    if summary_text:
+        lines.append(f"- {summary_text}")
+
+    if benefits:
+        lines.append("\n### Green Flag Highlights")
+        for benefit in benefits:
+            title = benefit.get("title", "Benefit")
+            category = benefit.get("category", "—")
+            strength = benefit.get("strength", "—")
+            confidence = benefit.get("confidence", "—")
+            pages = ", ".join(str(p) for p in benefit.get("page_numbers", [])) or "—"
+            quoted = benefit.get("quoted_text", "")
+            explanation = benefit.get("explanation", "")
+            lines.append(
+                f"- **{title}** ({category}, {strength}, {confidence}) — pages {pages}\n"
                 f"  - _{quoted}_\n  - {explanation}"
             )
 
