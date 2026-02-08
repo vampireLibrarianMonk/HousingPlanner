@@ -15,6 +15,9 @@ def init_state():
     if "commute_expanded" not in st.session_state:
         st.session_state["commute_expanded"] = False
 
+    if "neighborhood_expanded" not in st.session_state:
+        st.session_state["neighborhood_expanded"] = False
+
     if "custom_expenses" not in st.session_state:
         st.session_state["custom_expenses"] = pd.DataFrame(
             columns=["Label", "Amount", "Cadence"]
@@ -46,6 +49,12 @@ def init_state():
 
     if "hz_wind" not in st.session_state:
         st.session_state["hz_wind"] = False
+
+    if "hz_crime" not in st.session_state:
+        st.session_state["hz_crime"] = False
+
+    if "hz_sex_offenders" not in st.session_state:
+        st.session_state["hz_sex_offenders"] = False
 
     if "map_badge" not in st.session_state:
         st.session_state["map_badge"] = "3 locations"

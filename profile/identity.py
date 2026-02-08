@@ -127,3 +127,25 @@ def get_profile_identity(tag_key: str = "OwnerSub") -> Tuple[str, str]:
 
 def profile_key(owner_sub: str, house_slug: str) -> str:
     return f"{owner_sub}/{house_slug}"
+
+
+def bucket_name_for_owner(owner_sub: str, prefix: str) -> str:
+    return f"{prefix}-{owner_sub}".lower()
+
+
+def get_storage_bucket_prefix(
+    env_var: str = "STORAGE_BUCKET_PREFIX",
+    ssm_param_arn: str = "STORAGE_BUCKET_PREFIX_PARAM",
+    fallback_param_name: str = "/houseplanner/storage/bucket_prefix",
+) -> Optional[str]:
+    prefix = os.getenv(env_var)
+    if prefix:
+        return prefix
+
+    param_name = os.getenv(ssm_param_arn) or fallback_param_name
+    if not param_name:
+        return None
+
+    ssm = boto3.client("ssm")
+    response = ssm.get_parameter(Name=param_name)
+    return response["Parameter"]["Value"]

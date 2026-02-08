@@ -15,6 +15,7 @@ from .costs import compute_costs_monthly
 import matplotlib.pyplot as plt
 
 from profile.ui import save_current_profile
+from .chatbot import render_mortgage_chatbot
 
 
 def _validate_table_rows(rows: pd.DataFrame, required_columns: list[str], table_label: str) -> list[str]:
@@ -428,14 +429,14 @@ This expense is **not part of the mortgage** but helps you plan for future educa
             
             with st.expander("ℹ️ About additional expenses", expanded=False):
                 st.markdown("""
-Use this table to add any recurring expenses not covered in the sections above.
+Use the three inputs below to log recurring expenses not covered above.
 
-**Table Columns:**
+**Fields:**
 - **Expense** – A label/description for the expense (e.g., "Gym membership", "Streaming services")
 - **Amount** – The dollar amount
 - **Cadence** – Whether the amount is per month ($/month) or per year ($/year)
 
-Annual amounts are automatically converted to monthly for the total calculation.
+Each entry is saved into the scrollable log. Annual amounts are automatically converted to monthly.
 
 Examples: subscriptions, memberships, student loans, childcare beyond daycare, pet expenses, etc.
 """)
@@ -445,34 +446,116 @@ Examples: subscriptions, memberships, student loans, childcare beyond daycare, p
                 value=bool(include_flags.get("include_custom_expenses", True))
             )
 
-            # ---- Initialize backing data (NON-widget key) ----
-            if "custom_expenses_df" not in st.session_state:
-                st.session_state["custom_expenses_df"] = pd.DataFrame(
-                    columns=["Label", "Amount", "Cadence"]
+            if "custom_expenses_log" not in st.session_state:
+                st.session_state["custom_expenses_log"] = []
+
+            if "custom_expense_cadence" not in st.session_state:
+                st.session_state["custom_expense_cadence"] = "$/month"
+
+            custom_cols = st.columns([1.1, 1.0, 0.6], gap="small")
+            with custom_cols[0]:
+                custom_label = st.text_input(
+                    "Expense",
+                    key="custom_expense_label",
+                    placeholder="Gym, subscriptions, student loan",
+                )
+            with custom_cols[1]:
+                custom_amount = st.number_input(
+                    "Amount",
+                    min_value=0.0,
+                    step=10.0,
+                    key="custom_expense_amount",
+                )
+            with custom_cols[2]:
+                custom_cadence = st.selectbox(
+                    "Cadence",
+                    options=["$/month", "$/year"],
+                    key="custom_expense_cadence",
                 )
 
-            # ---- Widget owns its own key ----
-            custom_df = st.session_state["custom_expenses_df"].reset_index(drop=True)
-            custom_df.index = range(1, len(custom_df) + 1)
+            def _add_custom_expense() -> None:
+                label = st.session_state.get("custom_expense_label", "").strip()
+                if not label:
+                    st.session_state["custom_expense_error"] = "Please enter an expense label before adding."
+                    return
+                st.session_state.setdefault("custom_expenses_log", []).append(
+                    {
+                        "Label": label,
+                        "Amount": st.session_state.get("custom_expense_amount", 0.0),
+                        "Cadence": st.session_state.get("custom_expense_cadence", "$/month"),
+                    }
+                )
+                st.session_state["custom_expense_label"] = ""
+                st.session_state["custom_expense_amount"] = 0.0
+                st.session_state["custom_expense_cadence"] = "$/month"
+                st.session_state.pop("custom_expense_error", None)
 
-            custom_expenses_editor = st.data_editor(
-                custom_df,
-                hide_index=False,
-                num_rows="dynamic",
-                column_config={
-                    "Label": st.column_config.TextColumn("Expense"),
-                    "Amount": st.column_config.NumberColumn(
-                        "Amount",
-                        min_value=0.0,
-                        step=10.0
-                    ),
-                    "Cadence": st.column_config.SelectboxColumn(
-                        "Cadence",
-                        options=["$/month", "$/year"]
-                    ),
-                },
-                key="custom_expenses_editor",
-            )
+            st.button("Add Expense", key="custom_expense_add", on_click=_add_custom_expense)
+            if st.session_state.get("custom_expense_error"):
+                st.warning(st.session_state["custom_expense_error"])
+
+            def _save_custom_expense(idx: int) -> None:
+                log = st.session_state.get("custom_expenses_log", [])
+                if idx >= len(log):
+                    return
+                log[idx]["Label"] = st.session_state.get(f"custom_label_{idx}", "").strip()
+                log[idx]["Amount"] = st.session_state.get(f"custom_amount_{idx}", 0.0)
+                log[idx]["Cadence"] = st.session_state.get(f"custom_cadence_{idx}", "$/month")
+                st.session_state["custom_expenses_log"] = log
+
+            def _delete_custom_expense(idx: int) -> None:
+                log = st.session_state.get("custom_expenses_log", [])
+                if idx >= len(log):
+                    return
+                st.session_state["custom_expenses_log"] = [
+                    row for i, row in enumerate(log) if i != idx
+                ]
+
+            custom_log_container = st.container(height=160)
+            with custom_log_container:
+                if not st.session_state["custom_expenses_log"]:
+                    st.caption("No additional expenses logged yet.")
+                else:
+                    for idx, row in enumerate(st.session_state["custom_expenses_log"]):
+                        row_cols = st.columns([1.2, 1.0, 0.7, 0.3, 0.3], gap="small")
+                        with row_cols[0]:
+                            label = st.text_input(
+                                "Expense",
+                                value=row.get("Label", ""),
+                                key=f"custom_label_{idx}",
+                                label_visibility="collapsed",
+                            )
+                        with row_cols[1]:
+                            amount = st.number_input(
+                                "Amount",
+                                min_value=0.0,
+                                step=10.0,
+                                value=float(row.get("Amount", 0.0)),
+                                key=f"custom_amount_{idx}",
+                                label_visibility="collapsed",
+                            )
+                        with row_cols[2]:
+                            cadence = st.selectbox(
+                                "Cadence",
+                                options=["$/month", "$/year"],
+                                index=0 if row.get("Cadence") == "$/month" else 1,
+                                key=f"custom_cadence_{idx}",
+                                label_visibility="collapsed",
+                            )
+                        with row_cols[3]:
+                            st.button(
+                                "💾",
+                                key=f"custom_save_{idx}",
+                                on_click=_save_custom_expense,
+                                args=(idx,),
+                            )
+                        with row_cols[4]:
+                            st.button(
+                                "🗑️",
+                                key=f"custom_delete_{idx}",
+                                on_click=_delete_custom_expense,
+                                args=(idx,),
+                            )
 
             # =============================
             # Take Home Pay
@@ -481,14 +564,14 @@ Examples: subscriptions, memberships, student loans, childcare beyond daycare, p
             
             with st.expander("ℹ️ About take home pay", expanded=False):
                 st.markdown("""
-Use this table to enter your household income sources for affordability comparison.
+Use the three inputs below to log income sources for affordability comparison.
 
-**Table Columns:**
+**Fields:**
 - **Income Source** – A label for the income (e.g., "Salary - Partner 1", "Side gig")
 - **Amount** – The dollar amount (after taxes)
 - **Cadence** – Whether the amount is per month ($/month) or per year ($/year)
 
-Annual amounts are automatically converted to monthly.
+Each entry is saved into the scrollable log. Annual amounts are automatically converted to monthly.
 
 **Affordability Check**: Your total monthly expenses (mortgage + taxes + all other costs) are compared against your total take-home pay. If expenses exceed income, a warning is displayed.
 
@@ -501,32 +584,116 @@ Annual amounts are automatically converted to monthly.
             )
 
             # ---- Initialize backing data ----
-            if "take_home_sources_df" not in st.session_state:
-                st.session_state["take_home_sources_df"] = pd.DataFrame(
-                    columns=["Source", "Amount", "Cadence"]
+            if "take_home_log" not in st.session_state:
+                st.session_state["take_home_log"] = []
+
+            if "take_home_cadence" not in st.session_state:
+                st.session_state["take_home_cadence"] = "$/month"
+
+            take_home_cols = st.columns([1.2, 1.0, 0.6], gap="small")
+            with take_home_cols[0]:
+                take_home_label = st.text_input(
+                    "Income Source",
+                    key="take_home_label",
+                    placeholder="Salary, bonus, rental income",
+                )
+            with take_home_cols[1]:
+                take_home_amount = st.number_input(
+                    "Amount",
+                    min_value=0.0,
+                    step=100.0,
+                    key="take_home_amount",
+                )
+            with take_home_cols[2]:
+                take_home_cadence = st.selectbox(
+                    "Cadence",
+                    options=["$/month", "$/year"],
+                    key="take_home_cadence",
                 )
 
-            take_home_df = st.session_state["take_home_sources_df"].reset_index(drop=True)
-            take_home_df.index = range(1, len(take_home_df) + 1)
+            def _add_take_home() -> None:
+                label = st.session_state.get("take_home_label", "").strip()
+                if not label:
+                    st.session_state["take_home_error"] = "Please enter an income source label before adding."
+                    return
+                st.session_state.setdefault("take_home_log", []).append(
+                    {
+                        "Source": label,
+                        "Amount": st.session_state.get("take_home_amount", 0.0),
+                        "Cadence": st.session_state.get("take_home_cadence", "$/month"),
+                    }
+                )
+                st.session_state["take_home_label"] = ""
+                st.session_state["take_home_amount"] = 0.0
+                st.session_state["take_home_cadence"] = "$/month"
+                st.session_state.pop("take_home_error", None)
 
-            take_home_editor = st.data_editor(
-                take_home_df,
-                hide_index=False,
-                num_rows="dynamic",
-                column_config={
-                    "Source": st.column_config.TextColumn("Income Source"),
-                    "Amount": st.column_config.NumberColumn(
-                        "Amount",
-                        min_value=0.0,
-                        step=100.0
-                    ),
-                    "Cadence": st.column_config.SelectboxColumn(
-                        "Cadence",
-                        options=["$/month", "$/year"]
-                    ),
-                },
-                key="take_home_editor",
-            )
+            st.button("Add Income", key="take_home_add", on_click=_add_take_home)
+            if st.session_state.get("take_home_error"):
+                st.warning(st.session_state["take_home_error"])
+
+            def _save_take_home(idx: int) -> None:
+                log = st.session_state.get("take_home_log", [])
+                if idx >= len(log):
+                    return
+                log[idx]["Source"] = st.session_state.get(f"income_source_{idx}", "").strip()
+                log[idx]["Amount"] = st.session_state.get(f"income_amount_{idx}", 0.0)
+                log[idx]["Cadence"] = st.session_state.get(f"income_cadence_{idx}", "$/month")
+                st.session_state["take_home_log"] = log
+
+            def _delete_take_home(idx: int) -> None:
+                log = st.session_state.get("take_home_log", [])
+                if idx >= len(log):
+                    return
+                st.session_state["take_home_log"] = [
+                    row for i, row in enumerate(log) if i != idx
+                ]
+
+            take_home_log_container = st.container(height=160)
+            with take_home_log_container:
+                if not st.session_state["take_home_log"]:
+                    st.caption("No take-home income entries yet.")
+                else:
+                    for idx, row in enumerate(st.session_state["take_home_log"]):
+                        row_cols = st.columns([1.2, 1.0, 0.7, 0.3, 0.3], gap="small")
+                        with row_cols[0]:
+                            source = st.text_input(
+                                "Source",
+                                value=row.get("Source", ""),
+                                key=f"income_source_{idx}",
+                                label_visibility="collapsed",
+                            )
+                        with row_cols[1]:
+                            amount = st.number_input(
+                                "Amount",
+                                min_value=0.0,
+                                step=100.0,
+                                value=float(row.get("Amount", 0.0)),
+                                key=f"income_amount_{idx}",
+                                label_visibility="collapsed",
+                            )
+                        with row_cols[2]:
+                            cadence = st.selectbox(
+                                "Cadence",
+                                options=["$/month", "$/year"],
+                                index=0 if row.get("Cadence") == "$/month" else 1,
+                                key=f"income_cadence_{idx}",
+                                label_visibility="collapsed",
+                            )
+                        with row_cols[3]:
+                            st.button(
+                                "💾",
+                                key=f"income_save_{idx}",
+                                on_click=_save_take_home,
+                                args=(idx,),
+                            )
+                        with row_cols[4]:
+                            st.button(
+                                "🗑️",
+                                key=f"income_delete_{idx}",
+                                on_click=_delete_take_home,
+                                args=(idx,),
+                            )
 
             st.session_state["mortgage_inputs"] = {
                 "home_price": home_price,
@@ -561,30 +728,14 @@ Annual amounts are automatically converted to monthly.
                 "include_custom_expenses": include_custom_expenses,
                 "include_take_home": include_take_home,
             }
-            st.session_state["custom_expenses_df"] = (
-                pd.DataFrame(custom_expenses_editor, columns=["Label", "Amount", "Cadence"])
-                .reset_index(drop=True)
+            st.session_state["custom_expenses_log"] = list(
+                st.session_state.get("custom_expenses_log", [])
             )
-            st.session_state["take_home_sources_df"] = (
-                pd.DataFrame(take_home_editor, columns=["Source", "Amount", "Cadence"])
-                .reset_index(drop=True)
+            st.session_state["take_home_log"] = list(
+                st.session_state.get("take_home_log", [])
             )
 
-            custom_errors = _validate_table_rows(
-                st.session_state["custom_expenses_df"],
-                ["Label", "Amount", "Cadence"],
-                "Additional Expenses",
-            )
-            take_home_errors = _validate_table_rows(
-                st.session_state["take_home_sources_df"],
-                ["Source", "Amount", "Cadence"],
-                "Take Home Pay",
-            )
-
-            if custom_errors:
-                st.error("\n".join([f"• {err}" for err in custom_errors]))
-            if take_home_errors:
-                st.error("\n".join([f"• {err}" for err in take_home_errors]))
+            custom_errors = []
 
             # =============================
             # Final Calculate Action
@@ -596,7 +747,6 @@ Annual amounts are automatically converted to monthly.
                 + loan_errors
                 + tax_cost_errors
                 + custom_errors
-                + take_home_errors
             )
             
             # ---- Final Status Bar for Errors ----
@@ -612,6 +762,43 @@ Annual amounts are automatically converted to monthly.
             if calculate:
                 st.session_state["mortgage_just_calculated"] = True
                 st.session_state["chart_visible"] = True
+
+            take_home_monthly = 0.0
+            if include_take_home:
+                for row in st.session_state.get("take_home_log", []):
+                    if row.get("Cadence") == "$/month":
+                        take_home_monthly += float(row.get("Amount", 0.0))
+                    elif row.get("Cadence") == "$/year":
+                        take_home_monthly += float(row.get("Amount", 0.0)) / 12.0
+
+            render_mortgage_chatbot(
+                inputs=MortgageInputs(
+                    home_price=home_price,
+                    down_payment_value=down_payment_value,
+                    down_payment_is_percent=dp_is_percent,
+                    loan_term_years=int(loan_term_years),
+                    annual_interest_rate_pct=annual_rate,
+                    start_month=int(start_month),
+                    start_year=int(start_year),
+                    include_costs=include_costs,
+                    property_tax_value=property_tax_value,
+                    property_tax_is_percent=property_tax_is_percent,
+                    home_insurance_annual=home_insurance_annual,
+                    pmi_monthly=pmi_monthly,
+                    hoa_monthly=hoa_monthly,
+                    other_yearly=other_yearly,
+                ),
+                down_payment_amt=(home_price * (down_payment_value / 100.0))
+                if dp_is_percent
+                else down_payment_value,
+                loan_amount=max(
+                    home_price
+                    - ((home_price * (down_payment_value / 100.0)) if dp_is_percent else down_payment_value),
+                    0.0,
+                ),
+                include_take_home=include_take_home,
+                take_home_monthly=take_home_monthly if include_take_home else None,
+            )
 
             # Keep Mortgage section expanded after Calculate
             if calculate:
@@ -669,12 +856,11 @@ Annual amounts are automatically converted to monthly.
         if st.session_state.get("chart_visible", False):
                 # ---- Normalize Take Home (monthly) ----
                 take_home_monthly = 0.0
-                if not st.session_state.get("take_home_sources_df", pd.DataFrame()).empty:
-                    for _, row in st.session_state["take_home_sources_df"].iterrows():
-                        if row["Cadence"] == "$/month":
-                            take_home_monthly += row["Amount"]
-                        elif row["Cadence"] == "$/year":
-                            take_home_monthly += row["Amount"] / 12.0
+                for row in st.session_state.get("take_home_log", []):
+                    if row.get("Cadence") == "$/month":
+                        take_home_monthly += float(row.get("Amount", 0.0))
+                    elif row.get("Cadence") == "$/year":
+                        take_home_monthly += float(row.get("Amount", 0.0)) / 12.0
 
                 total_interest, total_pi_paid = amortization_totals(
                     loan_amount,
@@ -692,12 +878,12 @@ Annual amounts are automatically converted to monthly.
                 monthly_other = costs["other_home_monthly"] if include_costs else 0.0
 
                 custom_monthly = 0.0
-                if include_custom_expenses and not st.session_state.get("custom_expenses_df", pd.DataFrame()).empty:
-                    for _, row in st.session_state["custom_expenses_df"].iterrows():
-                        if row["Cadence"] == "$/month":
-                            custom_monthly += row["Amount"]
-                        elif row["Cadence"] == "$/year":
-                            custom_monthly += row["Amount"] / 12.0
+                if include_custom_expenses:
+                    for row in st.session_state.get("custom_expenses_log", []):
+                        if row.get("Cadence") == "$/month":
+                            custom_monthly += float(row.get("Amount", 0.0))
+                        elif row.get("Cadence") == "$/year":
+                            custom_monthly += float(row.get("Amount", 0.0)) / 12.0
 
                 monthly_total = (
                         pi

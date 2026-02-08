@@ -37,6 +37,7 @@ class HousePlannerCleanupStack(Stack):
         *,
         alb_arn: str,
         user_pool_id: str,
+        storage_bucket_prefix_param: str,
         **kwargs,
     ) -> None:
         """
@@ -44,6 +45,9 @@ class HousePlannerCleanupStack(Stack):
         :param user_pool_id: Cognito user pool ID
         """
         super().__init__(scope, construct_id, **kwargs)
+
+        bucket_prefix = f"houseplanner-{self.account}"
+        bucket_arn_pattern = f"arn:aws:s3:::{bucket_prefix}-*"
 
         # --------------------------------------------------
         # Delete-user cleanup Lambda
@@ -61,6 +65,7 @@ class HousePlannerCleanupStack(Stack):
             environment={
                 "ALB_ARN": alb_arn,
                 "USER_POOL_ID": user_pool_id,
+                "STORAGE_BUCKET_PREFIX_PARAM": storage_bucket_prefix_param,
             },
         )
 
@@ -99,6 +104,28 @@ class HousePlannerCleanupStack(Stack):
                 sid="CognitoUserLookup",
                 actions=["cognito-idp:AdminGetUser"],
                 resources=[f"arn:aws:cognito-idp:{self.region}:{self.account}:userpool/{user_pool_id}"],
+            )
+        )
+
+        self.delete_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="StorageBucketPrefixLookup",
+                actions=["ssm:GetParameter"],
+                resources=[storage_bucket_prefix_param],
+            )
+        )
+
+        self.delete_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="S3UserBucketCleanup",
+                actions=[
+                    "s3:ListBucket",
+                    "s3:ListBucketVersions",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                    "s3:DeleteBucket",
+                ],
+                resources=[bucket_arn_pattern, f"{bucket_arn_pattern}/*"],
             )
         )
 
