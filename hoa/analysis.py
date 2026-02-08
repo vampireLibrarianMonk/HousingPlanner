@@ -128,11 +128,12 @@ def invoke_bedrock_json(
     *,
     model_id: str,
     region_name: str | None = None,
+    max_tokens: int = 4096,
 ) -> Dict[str, Any]:
     client = boto3.client("bedrock-runtime", region_name=region_name)
     body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 1200,
+        "max_tokens": max_tokens,
         "temperature": 0.2,
         "messages": [
             {
