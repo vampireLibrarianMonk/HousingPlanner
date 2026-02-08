@@ -16,6 +16,7 @@ from config.pricing import (
     PRICING_VERSION,
     estimate_request_cost,
 )
+from profile.state_io import auto_save_profile
 
 STOPWORDS = {
     "a",
@@ -201,6 +202,8 @@ def _record_cost(input_tokens: int, output_tokens: int) -> None:
             "timestamp": date.today().isoformat(),
         }
     )
+    # Auto-save profile to persist costs
+    auto_save_profile()
 
 
 def _parse_date(text: str) -> str | None:

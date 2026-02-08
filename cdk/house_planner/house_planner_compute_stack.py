@@ -118,13 +118,16 @@ class HousePlannerComputeStack(Stack):
             )
         )
 
-        # Allow invoking Claude models via Bedrock (us-east-1 wildcard)
+        # Allow invoking Claude models via Bedrock (all regions for cross-region inference)
         self.instance_role.add_to_policy(
             iam.PolicyStatement(
                 sid="InvokeClaudeModels",
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
                 resources=[
-                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-*"
+                    # Foundation models (direct access - all US regions)
+                    "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
+                    # Inference profiles (cross-region routing)
+                    f"arn:aws:bedrock:*:{self.account}:inference-profile/*anthropic.claude-*",
                 ],
             )
         )

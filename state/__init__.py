@@ -3,9 +3,13 @@ import time
 import pandas as pd
 import streamlit as st
 from locations.providers import geocode_once
+from profile.state_io import auto_load_costs
 
 
 def init_state():
+    # Auto-load saved costs on page refresh
+    auto_load_costs()
+
     # -----------------------------
     # Session State
     # -----------------------------

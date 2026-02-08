@@ -14,6 +14,7 @@ from config.pricing import (
     PRICING_VERSION,
     estimate_request_cost,
 )
+from profile.state_io import auto_save_profile
 from .calculations import monthly_pi_payment
 from .costs import compute_costs_monthly
 from .models import MortgageInputs
@@ -86,6 +87,8 @@ def _record_cost(input_tokens: int, output_tokens: int) -> None:
             "pricing_version": PRICING_VERSION,
         }
     )
+    # Auto-save profile to persist costs
+    auto_save_profile()
 
 
 def _format_currency(value: float) -> str:

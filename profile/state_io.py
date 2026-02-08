@@ -7,6 +7,9 @@ from typing import Any, Dict
 import pandas as pd
 import streamlit as st
 
+from .identity import get_owner_sub
+from .storage import load_costs, save_costs, save_profile
+
 
 def _df_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     if df is None or df.empty:
@@ -72,3 +75,65 @@ def apply_profile(profile: Dict[str, Any]) -> None:
     if hoa:
         st.session_state["hoa_cost_records"] = hoa.get("cost_records", [])
         st.session_state["hoa_inference_profile"] = hoa.get("inference_profile")
+
+
+def _extract_costs() -> Dict[str, Any]:
+    """Extract only cost-related data from session state."""
+    return {
+        "assistant": {
+            "cost_records": st.session_state.get("assistant_cost_records", []),
+            "inference_profile": st.session_state.get("assistant_inference_profile"),
+        },
+        "mortgage": {
+            "cost_records": st.session_state.get("mortgage_cost_records", []),
+            "inference_profile": st.session_state.get("mortgage_inference_profile"),
+        },
+        "hoa": {
+            "cost_records": st.session_state.get("hoa_cost_records", []),
+            "inference_profile": st.session_state.get("hoa_inference_profile"),
+        },
+    }
+
+
+def auto_save_profile() -> bool:
+    """Auto-save user-level costs (not tied to a specific house). Returns True on success."""
+    owner_sub = get_owner_sub()
+    if not owner_sub:
+        return False
+    costs = _extract_costs()
+    save_costs(owner_sub, costs)
+    return True
+
+
+def auto_load_costs() -> bool:
+    """Auto-load cost records from saved user costs on page refresh. Returns True on success."""
+    # Skip if costs already loaded this session
+    if st.session_state.get("_costs_auto_loaded"):
+        return False
+
+    owner_sub = get_owner_sub()
+    if not owner_sub:
+        return False
+
+    costs = load_costs(owner_sub)
+    if not costs:
+        return False
+
+    # Load cost-related fields to session state
+    assistant = costs.get("assistant", {})
+    if assistant.get("cost_records"):
+        st.session_state["assistant_cost_records"] = assistant.get("cost_records", [])
+        st.session_state["assistant_inference_profile"] = assistant.get("inference_profile")
+
+    mortgage = costs.get("mortgage", {})
+    if mortgage.get("cost_records"):
+        st.session_state["mortgage_cost_records"] = mortgage.get("cost_records", [])
+        st.session_state["mortgage_inference_profile"] = mortgage.get("inference_profile")
+
+    hoa = costs.get("hoa", {})
+    if hoa.get("cost_records"):
+        st.session_state["hoa_cost_records"] = hoa.get("cost_records", [])
+        st.session_state["hoa_inference_profile"] = hoa.get("inference_profile")
+
+    st.session_state["_costs_auto_loaded"] = True
+    return True

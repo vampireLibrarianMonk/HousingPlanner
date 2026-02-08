@@ -29,6 +29,7 @@ from profile.identity import (
     bucket_name_for_owner,
     get_storage_bucket_prefix,
 )
+from profile.state_io import auto_save_profile
 import boto3
 
 S3_STORAGE_PER_GB_MONTH = 0.023
@@ -219,6 +220,8 @@ def _record_cost(
             "document_name": document_name,
         }
     )
+    # Auto-save profile to persist costs
+    auto_save_profile()
     return estimated_cost
 
 
