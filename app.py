@@ -27,9 +27,19 @@ import streamlit as st
 st.set_page_config(page_title="House Planner (Prototype)", layout="wide")
 
 
-# Logout link in sidebar - uses st.link_button for reliable navigation
+# Logout link in sidebar - force same-tab navigation to /logout
 # The /logout endpoint is handled by nginx which clears ALB cookies and redirects to Cognito logout
-st.sidebar.link_button("🚪 Logout", "/logout", use_container_width=True)
+st.sidebar.markdown(
+    """
+    <a href="/logout" target="_self" style="text-decoration:none;">
+      <button style="width:100%;padding:0.5rem 0.75rem;border:none;border-radius:0.5rem;"
+              aria-label="Logout">
+        🚪 Logout
+      </button>
+    </a>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.title("House Planner (Prototype)")
 
