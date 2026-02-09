@@ -43,6 +43,20 @@ aws secretsmanager create-secret \
   --secret-string "<door-profit-key>"
 ```
 
+```bash
+aws secretsmanager create-secret \
+  --name houseplanner/schooldigger_app_id \
+  --description "SchoolDigger App ID for school data enrichment" \
+  --secret-string "<schooldigger-app-id>"
+```
+
+```bash
+aws secretsmanager create-secret \
+  --name houseplanner/schooldigger_api_key \
+  --description "SchoolDigger API key for school data enrichment" \
+  --secret-string "<schooldigger-api-key>"
+```
+
 ## Deployment Steps
 
 1) Export required deployment variables:

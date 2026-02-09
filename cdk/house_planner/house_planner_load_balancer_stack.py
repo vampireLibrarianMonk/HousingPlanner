@@ -158,6 +158,7 @@ class HousePlannerLoadBalancerStack(Stack):
                     "s3:CreateBucket",
                     "s3:PutBucketTagging",
                     "s3:PutBucketEncryption",
+                    "s3:PutEncryptionConfiguration",
                     "s3:PutBucketPublicAccessBlock",
                     "s3:ListBucket",
                     "s3:GetBucketLocation",

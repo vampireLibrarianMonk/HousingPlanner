@@ -140,7 +140,9 @@ def get_storage_bucket_prefix(
 ) -> Optional[str]:
     prefix = os.getenv(env_var)
     if prefix:
-        return prefix
+        normalized = prefix.strip()
+        if normalized and "${" not in normalized and "__" not in normalized:
+            return normalized
 
     param_name = os.getenv(ssm_param_arn) or fallback_param_name
     if not param_name:
