@@ -27,77 +27,19 @@ import streamlit as st
 st.set_page_config(page_title="House Planner (Prototype)", layout="wide")
 
 
-# Logout button in sidebar - clears ALB cookies and redirects to Cognito logout
-st.session_state.setdefault("logout_requested", False)
-
-# Get Cognito configuration from environment for proper logout URL
-import os
-_cognito_domain = os.getenv("COGNITO_DOMAIN", "")
-_cognito_client_id = os.getenv("COGNITO_CLIENT_ID", "")
-_app_domain = os.getenv("APP_DOMAIN", "app.housing-planner.com")
-
+# Logout button in sidebar - redirects to nginx /logout endpoint
+# The /logout endpoint clears ALB cookies and redirects to Cognito logout
 if st.sidebar.button("🚪 Logout", width='stretch'):
-    st.session_state["logout_requested"] = True
-
-if st.session_state["logout_requested"]:
-    # Build the Cognito logout URL
-    # This clears both Cognito session AND triggers proper redirect
-    if _cognito_domain and _cognito_client_id:
-        cognito_logout_url = (
-            f"https://{_cognito_domain}/logout?"
-            f"client_id={_cognito_client_id}&"
-            f"logout_uri=https://{_app_domain}"
-        )
-    else:
-        # Fallback - just redirect to home (will require re-auth via ALB)
-        cognito_logout_url = f"https://{_app_domain}"
-    
-    # JavaScript to clear ALL ALB session cookies and redirect to Cognito logout
+    # Use JavaScript to navigate to /logout endpoint
+    # This is handled by nginx which clears cookies and redirects to Cognito
     st.components.v1.html(
-        f"""
+        """
         <script>
-          // Clear all ALB OIDC session cookies
-          document.cookie.split(';').forEach(function(c) {{
-            var name = c.trim().split('=')[0];
-            if (name.startsWith('AWSELBAuthSessionCookie')) {{
-              document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-            }}
-          }});
-          
-          // Also try to clear with domain variations
-          var domain = window.location.hostname;
-          document.cookie.split(';').forEach(function(c) {{
-            var name = c.trim().split('=')[0];
-            if (name.startsWith('AWSELBAuthSessionCookie')) {{
-              document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=' + domain;
-              document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=.' + domain;
-            }}
-          }});
-          
-          // Redirect to Cognito logout (or home) after clearing cookies
-          setTimeout(function() {{
-            window.location.href = '{cognito_logout_url}';
-          }}, 100);
+          window.location.href = '/logout';
         </script>
         """,
         height=0,
     )
-
-    st.markdown(
-        """
-        <style>
-          section[data-testid="stSidebar"],
-          div[data-testid="stSidebar"] {
-            display: none !important;
-          }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown("""
-    # Logging out...
-    You will be redirected to complete the logout process.
-    """)
     st.stop()
 
 st.title("House Planner (Prototype)")
