@@ -388,7 +388,7 @@ class HousePlannerComputeStack(Stack):
             "# Update the service file with the app domain",
             f"sed -i 's/--browser.serverPort=443/--browser.serverAddress={app_domain_name} --browser.serverPort=443/' /etc/systemd/system/streamlit.service",
             "# Inject storage bucket prefix into the service env",
-            "sed -i 's/__STORAGE_BUCKET_PREFIX__/${STORAGE_BUCKET_PREFIX}/' /etc/systemd/system/streamlit.service",
+            'sed -i "s/__STORAGE_BUCKET_PREFIX__/${STORAGE_BUCKET_PREFIX}/" /etc/systemd/system/streamlit.service',
             "# Inject storage bucket prefix param ARN for SSM fallback",
             f"sed -i 's#__STORAGE_BUCKET_PREFIX_PARAM__#arn:aws:ssm:{self.region}:{self.account}:parameter/houseplanner/storage/bucket_prefix#' /etc/systemd/system/streamlit.service",
             "",

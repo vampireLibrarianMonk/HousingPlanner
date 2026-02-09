@@ -128,6 +128,13 @@ from sun.ui import render_sun
 render_sun()
 
 # =============================
+# Schools & Districts
+# =============================
+from schools.ui import render_schools
+
+render_schools()
+
+# =============================
 # Disaster Risk & Hazard Mapping
 # =============================
 from disaster.ui import render_disaster
