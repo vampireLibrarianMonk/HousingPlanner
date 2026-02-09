@@ -44,6 +44,13 @@ st.sidebar.markdown(
 st.title("House Planner (Prototype)")
 
 # =============================
+# Location Management Section
+# =============================
+from locations.ui import render_locations
+
+render_locations()
+
+# =============================
 # Home Buying Checklist & Notes
 # =============================
 from assistant.ui import render_checklist_and_notes, render_floating_chatbot
@@ -71,13 +78,6 @@ if "mortgage_badge" not in st.session_state:
     st.session_state["mortgage_badge"] = "Monthly: —"
 
 render_mortgage()
-
-# =============================
-# Location Management Section
-# =============================
-from locations.ui import render_locations
-
-render_locations()
 
 # =============================
 # Commute Section
