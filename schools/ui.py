@@ -214,6 +214,8 @@ def _urban_grade(value: int | str | None) -> str | None:
 
 def render_schools() -> None:
     st.session_state.setdefault("schools_expanded", False)
+    st.session_state.setdefault("schools_run_analysis", False)
+    st.session_state.setdefault("schools_run_key", None)
 
     with st.expander("🎓 Schools & Districts", expanded=st.session_state["schools_expanded"]):
         st.subheader("Nearby Schools & District Assignment")
@@ -232,6 +234,24 @@ def render_schools() -> None:
             step=1,
             key="schools_radius_miles",
         )
+
+        places_cache_key = (
+            round(house["lat"], 4),
+            round(house["lon"], 4),
+            round(radius_miles, 2),
+        )
+
+        if st.session_state.get("schools_run_key") != places_cache_key:
+            st.session_state["schools_run_analysis"] = False
+
+        run_analysis = st.button("Run school analysis", type="primary")
+        if run_analysis:
+            st.session_state["schools_run_analysis"] = True
+            st.session_state["schools_run_key"] = places_cache_key
+
+        if not st.session_state.get("schools_run_analysis"):
+            st.info("Press **Run school analysis** to load schools for this radius.")
+            return
 
         api_key = load_google_maps_api_key()
         if not api_key:
@@ -275,12 +295,6 @@ def render_schools() -> None:
             },
             control=False,
         ).add_to(m)
-
-        places_cache_key = (
-            round(house["lat"], 4),
-            round(house["lon"], 4),
-            round(radius_miles, 2),
-        )
 
         # Check if we need to load new data
         needs_places_load = (
