@@ -55,6 +55,7 @@ def render_profile_manager() -> None:
         if save_cols[0].button("Save Profile", width='stretch'):
             save_path = save_current_profile()
             st.success(f"Saved to {save_path}")
+            st.rerun()
 
         load_disabled = selected_slug is None
         if save_cols[1].button("Load Profile", width='stretch', disabled=load_disabled):
