@@ -65,6 +65,13 @@ aws secretsmanager create-secret \
   --secret-string "<schooldigger-api-key>"
 ```
 
+```bash
+aws secretsmanager create-secret \
+  --name houseplanner/waze_api_key \
+  --description "Waze (OpenWebNinja) API key for commute incidents" \
+  --secret-string "<waze-api-key>"
+```
+
 ## Deployment Steps
 
 1) Export required deployment variables:
