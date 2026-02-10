@@ -1,6 +1,10 @@
 from datetime import timezone
+import math
 import requests
 import streamlit as st
+import polyline
+
+from config.urls import WAZE_DRIVING_DIRECTIONS_URL
 
 @st.cache_data(show_spinner=False)
 def ors_directions_driving(
@@ -48,7 +52,7 @@ def ors_directions_driving(
         segments = route.get("segments")
 
     else:
-        err_msg = data.get("error", {}).get("message", str(data))
+        err_msg = (data.get("error") or {}).get("message", str(data))
         raise RuntimeError(f"OpenRouteService error: {err_msg}")
 
     # ---------------------------------------
@@ -177,16 +181,112 @@ def google_directions_driving(
         distance = leg.get("distanceMeters")
         duration = leg.get("duration")
 
+    polyline = (route.get("polyline") or {}).get("encodedPolyline")
+
+    if distance is None and polyline:
+        distance = _polyline_distance_meters(polyline)
+
     if distance is None or duration is None:
         raise RuntimeError(
             "Google Routes response missing distance/duration: "
             f"{route}"
         )
 
-    polyline = route.get("polyline", {}).get("encodedPolyline")
-
     return (
         float(distance),
         float(duration.rstrip("s")),
         polyline,
     )
+
+
+@st.cache_data(show_spinner=False)
+def waze_directions_driving(
+    api_key: str,
+    start: dict,
+    end: dict,
+    departure_timestamp: int | None = None,
+    arrival_timestamp: int | None = None,
+    distance_units: str = "auto",
+    avoid_routes: str | None = None,
+    country: str = "US",
+    language: str = "EN",
+) -> tuple[float, float, list]:
+    """
+    Returns (distance_meters, duration_seconds, geometry)
+    using the Waze get-directions endpoint. Waze routing is supplemental only.
+
+    Note: Waze API prefers address strings over lat/lon coordinates.
+    If address is available, use it; otherwise fall back to "lat, lon" format.
+    """
+    # Waze API works better with address strings than raw coordinates
+    # Fall back to "lat, lon" format (note: space after comma) if no address
+    origin = start.get("address") or f"{start['lat']}, {start['lon']}"
+    destination = end.get("address") or f"{end['lat']}, {end['lon']}"
+
+    params = {
+        "origin": origin,
+        "destination": destination,
+        "distance_units": distance_units,
+        "country": country,
+        "language": language,
+    }
+    if departure_timestamp:
+        params["departure_time"] = int(departure_timestamp)
+    if arrival_timestamp:
+        params["arrival_time"] = int(arrival_timestamp)
+    if avoid_routes:
+        params["avoid_routes"] = avoid_routes
+
+    headers = {"X-API-Key": api_key}
+    resp = requests.get(
+        WAZE_DRIVING_DIRECTIONS_URL,
+        params=params,
+        headers=headers,
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    routes = (data.get("data") or {}).get("best_routes") or []
+    if not routes:
+        raise RuntimeError(f"Waze routing response missing routes: {data}")
+
+    route = routes[0]
+    distance = route.get("distance_meters")
+    duration = route.get("duration_seconds")
+    geometry = route.get("route_coordinates") or []
+
+    if distance is None or duration is None:
+        raise RuntimeError(
+            "Waze routing response missing distance/duration: "
+            f"{route}"
+        )
+
+    return float(distance), float(duration), geometry
+
+
+def _polyline_distance_meters(encoded_polyline: str) -> float | None:
+    if not encoded_polyline:
+        return None
+    try:
+        points = polyline.decode(encoded_polyline)
+    except Exception:
+        return None
+    if len(points) < 2:
+        return 0.0
+
+    total = 0.0
+    for (lat1, lon1), (lat2, lon2) in zip(points, points[1:]):
+        total += _haversine_meters(lat1, lon1, lat2, lon2)
+    return total
+
+
+def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return r * c

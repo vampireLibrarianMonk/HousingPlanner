@@ -38,6 +38,14 @@ aws secretsmanager create-secret \
 
 ```bash
 aws secretsmanager create-secret \
+  --name houseplanner/waze_api_key \
+  --description "Waze (OpenWebNinja) API key for commute incidents" \
+  --secret-string "<waze-api-key>"
+```
+
+
+```bash
+aws secretsmanager create-secret \
   --name houseplanner/door_profit_api_key \
   --description "DoorProfit API key for crime + sex offender overlays" \
   --secret-string "<door-profit-key>"

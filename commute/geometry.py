@@ -19,4 +19,7 @@ def decode_geometry(geometry, provider):
     if provider == "GOOGLE":
         return polyline.decode(geometry)
 
+    if provider == "WAZE":
+        return polyline.decode(geometry)
+
     return []

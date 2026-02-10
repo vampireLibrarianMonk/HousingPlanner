@@ -25,6 +25,7 @@ Required variables for local runs:
 
 - `ORS_API_KEY`
 - `GOOGLE_MAPS_API_KEY`
+- `WAZE_API_KEY`
 - `DOOR_PROFIT_API_KEY`
 - `ACCOUNT_ID`
 - `STORAGE_BUCKET_PREFIX`
@@ -35,10 +36,12 @@ Example `app/.env`:
 ```bash
 ORS_API_KEY=<open-route-service-key>
 GOOGLE_MAPS_API_KEY=<google-maps-key>
+WAZE_API_KEY=<openwebninja-waze-key>
 DOOR_PROFIT_API_KEY=<door-profit-key>
 ACCOUNT_ID=<your-aws-account-id>
 STORAGE_BUCKET_PREFIX=houseplanner-<your-aws-account-id>
 HOUSE_PLANNER_OWNER_SUB=<cognito-user-sub>
+WAZE_API_KEY=<waze-api-key>
 ```
 
 ## Application Sections

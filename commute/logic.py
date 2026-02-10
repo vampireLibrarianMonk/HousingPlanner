@@ -1,10 +1,15 @@
 from datetime import datetime, timedelta, timezone
+import time
 
 from .providers import (
     ors_directions_driving,
     google_directions_driving,
+    waze_directions_driving,
 )
 from .geometry import decode_geometry
+from .infra_providers import fetch_waze_incidents
+from .infra_normalize import normalize_waze_alerts, normalize_waze_jams
+from .infra_spatial import build_route_buffer, filter_events_by_buffer
 
 
 def compute_commute(
@@ -15,7 +20,9 @@ def compute_commute(
     routing_method,
     ors_api_key,
     google_api_key,
+    waze_api_key,
     departure_time,
+    status_callback=None,
 ):
     """
     Pure commute computation.
@@ -58,6 +65,7 @@ def compute_commute(
         )
 
     points = [home] + ordered_locs + revisit_locs + [home]
+    return_start_index = len(ordered_locs)
 
     # Initialize clock (Google requires >= now)
     now = datetime.now(tz=timezone.utc)
@@ -85,7 +93,7 @@ def compute_commute(
             )
             pts = decode_geometry(geom, "ORS")
             provider = "ORS"
-        else:
+        elif routing_method.startswith("Google"):
             dist_m, dur_s, geom = google_directions_driving(
                 api_key=google_api_key,
                 start=a,
@@ -94,6 +102,52 @@ def compute_commute(
             )
             pts = decode_geometry(geom, "GOOGLE")
             provider = "Google"
+        else:
+            attempt = 0
+            backoffs = [1, 2]
+            last_exc = None
+            while True:
+                try:
+                    if status_callback:
+                        status_callback(
+                            f"Waze routing {a['label']} → {b['label']} (attempt {attempt + 1})"
+                        )
+                    dist_m, dur_s, geom = waze_directions_driving(
+                        api_key=waze_api_key,
+                        start=a,
+                        end=b,
+                        departure_timestamp=int(current_dt.timestamp()),
+                        arrival_timestamp=None,
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= len(backoffs):
+                        break
+                    if status_callback:
+                        status_callback(
+                            f"Waze timeout, retrying in {backoffs[attempt]}s..."
+                        )
+                    time.sleep(backoffs[attempt])
+                    attempt += 1
+            if last_exc:
+                raise last_exc
+
+            pts = decode_geometry(geom, "WAZE") if geom else []
+            if not pts:
+                try:
+                    _, _, ors_geom = ors_directions_driving(
+                        api_key=ors_api_key,
+                        start_lon=a["lon"],
+                        start_lat=a["lat"],
+                        end_lon=b["lon"],
+                        end_lat=b["lat"],
+                    )
+                    pts = decode_geometry(ors_geom, "ORS")
+                except Exception:
+                    pts = []
+            provider = "Waze"
 
         if all_route_points and pts:
             all_route_points.extend(pts[1:])
@@ -107,6 +161,7 @@ def compute_commute(
             "label": f"{a['label']} → {b['label']}",
             "points": pts,
             "provider": provider,
+            "is_return_leg": i >= return_start_index,
         })
 
         arrive_dt = current_dt + timedelta(seconds=dur_s)
@@ -139,4 +194,42 @@ def compute_commute(
         "total_m": total_m,
         "total_s": total_s,
         "segment_routes": segment_routes,
+        "route_points": all_route_points,
+    }
+
+
+def compute_infrastructure_support(
+    *,
+    route_points,
+    waze_api_key,
+    buffer_m=200.0,
+):
+    if not route_points:
+        return {
+            "events": [],
+            "summary": {},
+        }
+
+    lats = [pt[0] for pt in route_points]
+    lons = [pt[1] for pt in route_points]
+    bbox = (min(lons), min(lats), max(lons), max(lats))
+
+    waze_raw = fetch_waze_incidents(waze_api_key, bbox) or {}
+    waze_alerts = normalize_waze_alerts(waze_raw.get("alerts", []) or [])
+    waze_jams = normalize_waze_jams(waze_raw.get("jams", []) or [])
+    waze_events = waze_alerts + waze_jams
+
+    buffer_geom = build_route_buffer(route_points, meters=buffer_m)
+    events = filter_events_by_buffer(waze_events, buffer_geom)
+
+    summary = {
+        "incidents": sum(1 for e in events if e.get("event_type") == "incident"),
+        "jams": sum(1 for e in events if e.get("event_type") == "jam"),
+        "total": len(events),
+    }
+
+    return {
+        "events": events,
+        "summary": summary,
+        "buffer_bbox": bbox,
     }
