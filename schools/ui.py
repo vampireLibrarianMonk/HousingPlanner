@@ -5,6 +5,7 @@ from pathlib import Path
 import folium
 import pandas as pd
 import pyproj
+import requests
 from shapely.geometry import Point
 from shapely.ops import transform
 import streamlit as st
@@ -399,6 +400,7 @@ def render_schools() -> None:
 
         # Step 4: Fetch Urban Institute data for additional enrichment
         urban_rows = []
+        urban_error = None
         if state_abbrev:
             needs_urban_load = (
                 "schools_urban" not in st.session_state
@@ -410,24 +412,44 @@ def render_schools() -> None:
                     status_container.write(f"📊 **Step 4/5:** Fetching federal school data from Urban Institute...")
                     status_container.write(f"   • State: {state_abbrev}")
                     status_container.write(f"   • Year: 2022 (latest available)")
-                st.session_state["schools_urban"] = fetch_urban_institute_schools_by_state(
-                    state=state_abbrev
-                )
-                st.session_state["schools_urban_key"] = state_abbrev
-                if status_container:
-                    status_container.write(f"   ✓ Loaded **{len(st.session_state['schools_urban'])} schools** from Urban Institute")
+                try:
+                    st.session_state["schools_urban"] = fetch_urban_institute_schools_by_state(
+                        state=state_abbrev
+                    )
+                    st.session_state["schools_urban_key"] = state_abbrev
+                    if status_container:
+                        status_container.write(
+                            f"   ✓ Loaded **{len(st.session_state['schools_urban'])} schools** from Urban Institute"
+                        )
+                except requests.exceptions.RequestException as exc:
+                    urban_error = (
+                        "Urban Institute data is temporarily unavailable due to a network timeout. "
+                        "We'll continue loading other school data sources."
+                    )
+                    st.session_state["schools_urban"] = []
+                    st.session_state["schools_urban_key"] = state_abbrev
+                    if status_container:
+                        status_container.write(f"   ⚠️ {urban_error}")
+                    st.warning(f"Urban Institute lookup failed: {exc}")
             urban_rows = st.session_state.get("schools_urban", [])
 
         # Update status to complete
         if status_container:
             status_container.write("---")
-            status_container.write("✅ **Complete:** All school data loaded successfully!")
-            total_sources = 3 if urban_rows else 2
-            status_container.update(
-                label=f"✅ School data loaded ({len(place_rows)} schools, {len(matches)} matched)",
-                state="complete",
-                expanded=False
-            )
+            if urban_error:
+                status_container.write("⚠️ **Loaded with warnings:** Urban Institute data could not be reached.")
+                status_container.update(
+                    label=f"⚠️ School data loaded with warnings ({len(place_rows)} schools, {len(matches)} matched)",
+                    state="error",
+                    expanded=False,
+                )
+            else:
+                status_container.write("✅ **Complete:** All school data loaded successfully!")
+                status_container.update(
+                    label=f"✅ School data loaded ({len(place_rows)} schools, {len(matches)} matched)",
+                    state="complete",
+                    expanded=False,
+                )
 
         schools_group = folium.FeatureGroup(
             name=f"Schools ({len(place_rows)})",

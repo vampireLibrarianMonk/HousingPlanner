@@ -23,9 +23,26 @@ def _records_to_df(records: list[dict[str, Any]], columns: list[str]) -> pd.Data
     return pd.DataFrame(records, columns=columns)
 
 
+def _serialize_commute_profiles(commute_profiles: dict[str, Any]) -> dict[str, Any]:
+    serialized = {}
+    for key, profile in commute_profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        profile_copy = dict(profile)
+        departure_time = profile_copy.get("departure_time")
+        if hasattr(departure_time, "strftime"):
+            profile_copy["departure_time"] = departure_time.strftime("%H:%M:%S")
+        serialized[key] = profile_copy
+    return serialized
+
+
 def extract_profile() -> Dict[str, Any]:
+    commute_profiles = st.session_state.get("commute_profiles", {})
     return {
         "locations": st.session_state.get("map_data", {}).get("locations", []),
+        "commute": {
+            "profiles": _serialize_commute_profiles(commute_profiles),
+        },
         "assistant": {
             "checklist": st.session_state.get("assistant_checklist", []),
             "notes": st.session_state.get("assistant_notes", ""),
@@ -52,6 +69,19 @@ def apply_profile(profile: Dict[str, Any]) -> None:
     st.session_state["map_data"] = {"locations": locations}
     st.session_state["map_badge"] = f"{len(locations)} locations"
     st.session_state["map_expanded"] = True
+
+    commute = profile.get("commute", {})
+    if commute:
+        profiles = commute.get("profiles", {})
+        for key, commute_profile in profiles.items():
+            if isinstance(commute_profile, dict):
+                dep = commute_profile.get("departure_time")
+                if isinstance(dep, str):
+                    try:
+                        commute_profile["departure_time"] = pd.to_datetime(dep).time()
+                    except Exception:
+                        pass
+        st.session_state["commute_profiles"] = profiles
 
     assistant = profile.get("assistant", {})
     if assistant:

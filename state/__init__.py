@@ -16,6 +16,9 @@ def init_state():
     if "commute_results" not in st.session_state:
         st.session_state["commute_results"] = {}
 
+    if "commute_profiles" not in st.session_state:
+        st.session_state["commute_profiles"] = {}
+
     if "commute_expanded" not in st.session_state:
         st.session_state["commute_expanded"] = False
 
