@@ -44,6 +44,13 @@ st.sidebar.markdown(
 st.title("House Planner (Prototype)")
 
 # =============================
+# Zillow Property Search
+# =============================
+from zillow.ui import render_zillow_search
+
+render_zillow_search()
+
+# =============================
 # Location Management Section
 # =============================
 from locations.ui import render_locations
