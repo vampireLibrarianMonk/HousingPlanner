@@ -5,6 +5,7 @@ import streamlit as st
 import polyline
 
 from config.urls import WAZE_DRIVING_DIRECTIONS_URL
+from profile.costs import record_api_usage
 
 @st.cache_data(show_spinner=False)
 def ors_directions_driving(
@@ -163,6 +164,23 @@ def google_directions_driving(
 
     resp = requests.post(url, headers=headers, json=payload, timeout=20)
     resp.raise_for_status()
+    record_api_usage(
+        service_key="Google Routes API Compute Routes Essentials",
+        url=url,
+        requests=1,
+        metadata={
+            "provider": "google_routes",
+            "lookup": "directions",
+            "query": {
+                "origin": payload["origin"],
+                "destination": payload["destination"],
+                "travelMode": payload.get("travelMode"),
+                "routingPreference": payload.get("routingPreference"),
+                "departureTime": payload.get("departureTime"),
+                "routeModifiers": payload.get("routeModifiers"),
+            },
+        },
+    )
     data = resp.json()
 
     route = data["routes"][0]
@@ -245,6 +263,16 @@ def waze_directions_driving(
         timeout=20,
     )
     resp.raise_for_status()
+    record_api_usage(
+        service_key="OpenWebNinja Driving Directions",
+        url=WAZE_DRIVING_DIRECTIONS_URL,
+        requests=1,
+        metadata={
+            "provider": "waze",
+            "lookup": "directions",
+            "query": params,
+        },
+    )
     data = resp.json()
 
     routes = (data.get("data") or {}).get("best_routes") or []

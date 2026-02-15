@@ -65,10 +65,20 @@ def extract_profile() -> Dict[str, Any]:
 
 
 def apply_profile(profile: Dict[str, Any]) -> None:
+    # Collapse primary sections by default when loading a profile.
+    st.session_state["map_expanded"] = False
+    st.session_state["commute_expanded"] = False
+    st.session_state["neighborhood_expanded"] = False
+    st.session_state["disaster_expanded"] = False
+    st.session_state["mortgage_expanded"] = False
+    st.session_state["sun_expanded"] = False
+    st.session_state["zillow_expanded"] = False
+    st.session_state["schools_expanded"] = False
+    st.session_state["service_availability_expanded"] = False
+
     locations = profile.get("locations", [])
     st.session_state["map_data"] = {"locations": locations}
     st.session_state["map_badge"] = f"{len(locations)} locations"
-    st.session_state["map_expanded"] = True
 
     commute = profile.get("commute", {})
     if commute:
@@ -99,7 +109,6 @@ def apply_profile(profile: Dict[str, Any]) -> None:
     st.session_state["mortgage_cost_records"] = mortgage.get("cost_records", [])
     st.session_state["mortgage_inference_profile"] = mortgage.get("inference_profile")
 
-    st.session_state["mortgage_expanded"] = True
 
     hoa = profile.get("hoa", {})
     if hoa:
@@ -121,6 +130,9 @@ def _extract_costs() -> Dict[str, Any]:
         "hoa": {
             "cost_records": st.session_state.get("hoa_cost_records", []),
             "inference_profile": st.session_state.get("hoa_inference_profile"),
+        },
+        "api": {
+            "usage_records": st.session_state.get("api_usage_records", []),
         },
     }
 
@@ -164,6 +176,10 @@ def auto_load_costs() -> bool:
     if hoa.get("cost_records"):
         st.session_state["hoa_cost_records"] = hoa.get("cost_records", [])
         st.session_state["hoa_inference_profile"] = hoa.get("inference_profile")
+
+    api = costs.get("api", {})
+    if api.get("usage_records"):
+        st.session_state["api_usage_records"] = api.get("usage_records", [])
 
     st.session_state["_costs_auto_loaded"] = True
     return True

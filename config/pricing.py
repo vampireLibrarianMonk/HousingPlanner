@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List
+import json
 
 
-PRICING_VERSION = "2026-01"
+PRICING_PATH = Path(__file__).resolve().parents[1] / "pricing" / "static.json"
 
 
 @dataclass(frozen=True)
@@ -17,116 +19,38 @@ class PricingProfile:
     context: str
 
 
-PRICING_REGISTRY: Dict[str, PricingProfile] = {
-    "anthropic.claude-haiku-4-5": PricingProfile(
-        model_id="anthropic.claude-haiku-4-5",
-        input_per_1m=1.10,
-        output_per_1m=5.50,
-        context="standard",
-    ),
-    "anthropic.claude-sonnet-4-5": PricingProfile(
-        model_id="anthropic.claude-sonnet-4-5",
-        input_per_1m=3.30,
-        output_per_1m=16.50,
-        context="standard",
-    ),
-    "anthropic.claude-sonnet-4-5-long": PricingProfile(
-        model_id="anthropic.claude-sonnet-4-5",
-        input_per_1m=6.60,
-        output_per_1m=24.75,
-        context="long",
-    ),
-    "anthropic.claude-opus-4-5": PricingProfile(
-        model_id="anthropic.claude-opus-4-5",
-        input_per_1m=5.50,
-        output_per_1m=27.50,
-        context="standard",
-    ),
-    "anthropic.claude-opus-4-1": PricingProfile(
-        model_id="anthropic.claude-opus-4-1",
-        input_per_1m=15.00,
-        output_per_1m=75.00,
-        context="standard",
-    ),
-    "anthropic.claude-opus-4": PricingProfile(
-        model_id="anthropic.claude-opus-4",
-        input_per_1m=15.00,
-        output_per_1m=75.00,
-        context="standard",
-    ),
-    "anthropic.claude-sonnet-4": PricingProfile(
-        model_id="anthropic.claude-sonnet-4",
-        input_per_1m=3.00,
-        output_per_1m=15.00,
-        context="standard",
-    ),
-    "anthropic.claude-sonnet-4-long": PricingProfile(
-        model_id="anthropic.claude-sonnet-4",
-        input_per_1m=6.00,
-        output_per_1m=22.50,
-        context="long",
-    ),
-    "anthropic.claude-3-7-sonnet": PricingProfile(
-        model_id="anthropic.claude-3-7-sonnet",
-        input_per_1m=3.00,
-        output_per_1m=15.00,
-        context="standard",
-    ),
-    "anthropic.claude-3-5-sonnet": PricingProfile(
-        model_id="anthropic.claude-3-5-sonnet",
-        input_per_1m=3.00,
-        output_per_1m=15.00,
-        context="standard",
-    ),
-    "anthropic.claude-3-5-haiku": PricingProfile(
-        model_id="anthropic.claude-3-5-haiku",
-        input_per_1m=0.80,
-        output_per_1m=4.00,
-        context="standard",
-    ),
-    "anthropic.claude-3-5-sonnet-v2": PricingProfile(
-        model_id="anthropic.claude-3-5-sonnet-v2",
-        input_per_1m=3.00,
-        output_per_1m=15.00,
-        context="standard",
-    ),
-    "anthropic.claude-3-opus": PricingProfile(
-        model_id="anthropic.claude-3-opus",
-        input_per_1m=15.00,
-        output_per_1m=75.00,
-        context="standard",
-    ),
-    "anthropic.claude-3-haiku": PricingProfile(
-        model_id="anthropic.claude-3-haiku",
-        input_per_1m=0.25,
-        output_per_1m=1.25,
-        context="standard",
-    ),
-    "anthropic.claude-3-sonnet": PricingProfile(
-        model_id="anthropic.claude-3-sonnet",
-        input_per_1m=3.00,
-        output_per_1m=15.00,
-        context="standard",
-    ),
-    "anthropic.claude-2-1": PricingProfile(
-        model_id="anthropic.claude-2-1",
-        input_per_1m=8.00,
-        output_per_1m=24.00,
-        context="standard",
-    ),
-    "anthropic.claude-2": PricingProfile(
-        model_id="anthropic.claude-2",
-        input_per_1m=8.00,
-        output_per_1m=24.00,
-        context="standard",
-    ),
-    "anthropic.claude-instant": PricingProfile(
-        model_id="anthropic.claude-instant",
-        input_per_1m=0.80,
-        output_per_1m=2.40,
-        context="standard",
-    ),
-}
+def _load_pricing_data() -> dict:
+    if not PRICING_PATH.exists():
+        raise FileNotFoundError(f"Pricing registry not found: {PRICING_PATH}")
+    with PRICING_PATH.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def get_pricing_version() -> str:
+    data = _load_pricing_data()
+    metadata = data.get("metadata", {})
+    return metadata.get("version", "unknown")
+
+
+def get_llm_pricing_registry() -> Dict[str, PricingProfile]:
+    data = _load_pricing_data()
+    registry: Dict[str, PricingProfile] = {}
+    for entry in data.get("llm_pricing", []):
+        model_key = entry.get("model_key")
+        if not model_key:
+            continue
+        registry[model_key] = PricingProfile(
+            model_id=entry.get("model_id", model_key),
+            input_per_1m=float(entry.get("input_per_1m", 0.0)),
+            output_per_1m=float(entry.get("output_per_1m", 0.0)),
+            context=entry.get("context", "standard"),
+        )
+    return registry
+
+
+def get_api_pricing_entries() -> list[dict]:
+    data = _load_pricing_data()
+    return list(data.get("api_pricing", []))
 
 
 @dataclass(frozen=True)
@@ -176,7 +100,7 @@ CLAUDE_INFERENCE_PROFILES: List[InferenceProfile] = [
 
 
 def estimate_request_cost(model_key: str, input_tokens: int, output_tokens: int) -> float:
-    pricing = PRICING_REGISTRY[model_key]
+    pricing = get_llm_pricing_registry()[model_key]
     return (
         input_tokens * pricing.input_per_1m
         + output_tokens * pricing.output_per_1m

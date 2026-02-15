@@ -196,6 +196,34 @@ def _is_secondary(level: str | None) -> bool:
     return (level or "").strip().lower() == "secondary"
 
 
+def _is_private_candidate(place: dict, matched: dict | None) -> bool:
+    if matched is not None:
+        return bool(matched.get("is_private"))
+    types = [str(t).strip().lower() for t in (place.get("types") or []) if t]
+    name = (place.get("name") or "").strip().lower()
+    excluded_types = {
+        "sports_activity_location",
+        "sports_club",
+        "swimming_pool",
+        "gym",
+        "health",
+        "massage",
+        "spa",
+        "martial_arts_school",
+        "beauty_salon",
+        "hair_care",
+    }
+    if any(t in excluded_types for t in types):
+        return False
+    if "child_care_agency" in types:
+        return True
+    if any(t in types for t in ("preschool", "primary_school", "secondary_school")):
+        return True
+    if "school" in types and any(keyword in name for keyword in ("preschool", "montessori", "academy", "prep", "preparatory")):
+        return True
+    return False
+
+
 def _urban_grade(value: int | str | None) -> str | None:
     if value is None:
         return None
@@ -210,6 +238,21 @@ def _urban_grade(value: int | str | None) -> str | None:
     if value_int == 0:
         return "K"
     return str(value_int)
+
+
+def _validate_school_link(url: str | None, *, invalid_phrases: tuple[str, ...]) -> str | None:
+    if not url:
+        return None
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code >= 400:
+            return None
+        page_text = resp.text.lower()
+        if any(phrase in page_text for phrase in invalid_phrases):
+            return None
+    except requests.RequestException:
+        return None
+    return url
 
 
 def render_schools() -> None:
@@ -465,10 +508,21 @@ def render_schools() -> None:
                     expanded=False,
                 )
 
-        schools_group = folium.FeatureGroup(
-            name=f"Schools ({len(place_rows)})",
+        district_schools_group = folium.FeatureGroup(
+            name="District schools (public)",
             show=True,
         )
+        private_schools_group = folium.FeatureGroup(
+            name="Private schools",
+            show=False,
+        )
+        other_facilities_group = folium.FeatureGroup(
+            name="Other educational facilities",
+            show=False,
+        )
+        district_marker_count = 0
+        private_marker_count = 0
+        other_marker_count = 0
 
         # First pass: filter places to only those within search radius
         places_in_radius = []
@@ -505,30 +559,6 @@ def render_schools() -> None:
                 tooltip_lines.append(f"Phone: {place.get('phone')}")
             if place.get("website"):
                 tooltip_lines.append(f"Website: {place.get('website')}")
-
-            if _is_secondary(level):
-                folium.RegularPolygonMarker(
-                    location=[lat, lon],
-                    number_of_sides=3,
-                    radius=7,
-                    color=color,
-                    fill=True,
-                    fill_color=color,
-                    fill_opacity=0.85,
-                    weight=1,
-                    tooltip=folium.Tooltip("<br>".join(tooltip_lines)),
-                ).add_to(schools_group)
-            else:
-                folium.CircleMarker(
-                    location=[lat, lon],
-                    radius=6,
-                    color=color,
-                    fill=True,
-                    fill_color=color,
-                    fill_opacity=0.85,
-                    weight=1,
-                    tooltip=folium.Tooltip("<br>".join(tooltip_lines)),
-                ).add_to(schools_group)
 
             matched = matches.get(place.get("place_id"))
             if matched:
@@ -591,6 +621,51 @@ def render_schools() -> None:
                 place.get("state"),
             )
 
+            gs_search_url = _validate_school_link(
+                gs_search_url,
+                invalid_phrases=("your search did not find", "no results found"),
+            )
+            niche_url = _validate_school_link(
+                niche_url,
+                invalid_phrases=("page not found", "we couldn't find the page"),
+            )
+
+            is_private_school = _is_private_candidate(place, matched)
+            has_district = bool(place.get("district_name"))
+            if is_private_school:
+                target_group = private_schools_group
+                private_marker_count += 1
+            elif has_district:
+                target_group = district_schools_group
+                district_marker_count += 1
+            else:
+                target_group = other_facilities_group
+                other_marker_count += 1
+
+            if _is_secondary(level):
+                folium.RegularPolygonMarker(
+                    location=[lat, lon],
+                    number_of_sides=3,
+                    radius=7,
+                    color=color,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.85,
+                    weight=1,
+                    tooltip=folium.Tooltip("<br>".join(tooltip_lines)),
+                ).add_to(target_group)
+            else:
+                folium.CircleMarker(
+                    location=[lat, lon],
+                    radius=6,
+                    color=color,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.85,
+                    weight=1,
+                    tooltip=folium.Tooltip("<br>".join(tooltip_lines)),
+                ).add_to(target_group)
+
             table_rows.append({
                 "Name": place.get("name") or "—",
                 "Level": level or "—",
@@ -600,15 +675,25 @@ def render_schools() -> None:
                 "Phone": place.get("phone") or "—",
                 "Website": place.get("website") or "—",
                 "Grades": grade_band or "—",
-                "Type": "Private" if matched and matched.get("is_private") else "Public",
+                "Type": "Private" if is_private_school else "Public",
                 "District": place.get("district_name") or "—",
+                "Category": (
+                    "Private" if is_private_school
+                    else "District" if has_district
+                    else "Other"
+                ),
                 "State Rank": state_rank_value,
                 "Rank Stars": rank_stars_value,
                 "GreatSchools": gs_search_url,
                 "Niche": niche_url,
             })
 
-        schools_group.add_to(m)
+        if district_marker_count:
+            district_schools_group.add_to(m)
+        if private_marker_count:
+            private_schools_group.add_to(m)
+        if other_marker_count:
+            other_facilities_group.add_to(m)
 
         # Step 5: Fetch district boundaries
         district_geojson = None
@@ -691,13 +776,14 @@ def render_schools() -> None:
 
         st_folium(m, width=900, height=500, returned_objects=[])
 
-        # Split schools into district schools vs other educational facilities
-        district_schools = [row for row in table_rows if row.get("District") and row.get("District") != "—"]
-        other_facilities = [row for row in table_rows if not row.get("District") or row.get("District") == "—"]
+        # Split schools into district public, private, and other educational facilities
+        district_schools = [row for row in table_rows if row.get("Category") == "District"]
+        private_schools = [row for row in table_rows if row.get("Category") == "Private"]
+        other_facilities = [row for row in table_rows if row.get("Category") == "Other"]
         
-        # Table 1: District Schools (traditional K-12 schools)
-        st.markdown("### 🏫 District Schools")
-        st.caption("Traditional K-12 schools with district assignments — the schools kids attend daily")
+        # Table 1: District Public Schools (traditional K-12 schools)
+        st.markdown("### 🏫 District Schools (Public)")
+        st.caption("Traditional K-12 public schools with district assignments — the schools kids attend daily")
         if district_schools:
             df_district = pd.DataFrame(district_schools)
             # Reorder columns to prioritize important info (including review site links)
@@ -740,14 +826,55 @@ def render_schools() -> None:
             )
         else:
             st.caption("No district schools found within this radius.")
+
+        # Table 2: Private Schools
+        st.markdown("### 🏫 Private Schools")
+        st.caption("Private schools and preschools not tied to a public district")
+        if private_schools:
+            df_private = pd.DataFrame(private_schools)
+            private_columns = [
+                "Name", "Level", "Grades", "Type", "Distance (mi)",
+                "GreatSchools", "Niche", "Phone", "Website"
+            ]
+            private_columns = [c for c in private_columns if c in df_private.columns]
+            df_private = df_private[private_columns]
+            df_private = df_private.sort_values(["Distance (mi)"], ascending=[True])
+
+            private_column_config = {
+                "GreatSchools": st.column_config.LinkColumn(
+                    "GreatSchools",
+                    help="View this school on GreatSchools.org with ratings and reviews",
+                    display_text="🏫 View",
+                ),
+                "Niche": st.column_config.LinkColumn(
+                    "Niche",
+                    help="View this school on Niche.com with grades and reviews",
+                    display_text="📊 View",
+                ),
+                "Website": st.column_config.LinkColumn(
+                    "Website",
+                    help="School website",
+                    display_text="🌐 Site",
+                ),
+            }
+
+            st.dataframe(
+                df_private,
+                width="stretch",
+                hide_index=True,
+                height=min(350, 35 * len(private_schools) + 38),
+                column_config=private_column_config,
+            )
+        else:
+            st.caption("No private schools found within this radius.")
         
-        # Table 2: Other Educational Facilities (swim schools, daycares, tutoring, etc.)
+        # Table 3: Other Educational Facilities (swim schools, daycares, tutoring, etc.)
         st.markdown("### 📚 Other Educational Facilities")
-        st.caption("Specialty programs, preschools, daycares, and enrichment centers (not traditional K-12)")
+        st.caption("Specialty programs, tutoring, and enrichment centers not classified as schools")
         if other_facilities:
             df_other = pd.DataFrame(other_facilities)
             # Simplified columns for non-district facilities (include review site links)
-            other_columns = ["Name", "Level", "Rating", "Reviews", "Distance (mi)", "GreatSchools", "Niche", "Phone", "Website"]
+            other_columns = ["Name", "Level", "Rating", "Reviews", "Distance (mi)", "Phone", "Website"]
             # Only include columns that exist
             other_columns = [c for c in other_columns if c in df_other.columns]
             df_other = df_other[other_columns]
@@ -755,16 +882,6 @@ def render_schools() -> None:
             
             # Configure clickable link columns for other facilities
             other_column_config = {
-                "GreatSchools": st.column_config.LinkColumn(
-                    "GreatSchools",
-                    help="Search for this facility on GreatSchools.org",
-                    display_text="🏫 View",
-                ),
-                "Niche": st.column_config.LinkColumn(
-                    "Niche",
-                    help="Search for this facility on Niche.com",
-                    display_text="📊 View",
-                ),
                 "Website": st.column_config.LinkColumn(
                     "Website",
                     help="Facility website",

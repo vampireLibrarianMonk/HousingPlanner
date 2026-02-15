@@ -54,8 +54,31 @@ def _sync_commute_table(profile: dict, locations: list[dict]) -> pd.DataFrame:
     table_records = profile.get("commute_table", [])
     table_df = pd.DataFrame(table_records)
 
+    home_label = profile.get("home_label")
+    valid_labels = {loc["label"] for loc in locations if loc["label"] != home_label}
+    label_to_address = {loc["label"]: loc.get("address", "") for loc in locations}
+
     if table_df.empty:
-        return table_df
+        base_rows = []
+        order_counter = 1
+        for loc in locations:
+            if loc["label"] == home_label:
+                continue
+            base_rows.append({
+                "Include": False,
+                "Revisit": False,
+                "Order": order_counter,
+                "Loiter (min)": 0,
+                "Label": loc["label"],
+                "Address": loc["address"],
+            })
+            order_counter += 1
+        return pd.DataFrame(base_rows)
+
+    if "Label" in table_df.columns:
+        table_df = table_df[table_df["Label"].isin(valid_labels)].copy()
+        if "Address" in table_df.columns:
+            table_df["Address"] = table_df["Label"].map(label_to_address).fillna("")
 
     existing_labels = set(table_df.get("Label", []))
     new_rows = []
@@ -65,7 +88,7 @@ def _sync_commute_table(profile: dict, locations: list[dict]) -> pd.DataFrame:
         if numeric_orders.notna().any():
             next_order = int(numeric_orders.max()) + 1
     for loc in locations:
-        if loc["label"] == profile.get("home_label"):
+        if loc["label"] == home_label:
             continue
         if loc["label"] not in existing_labels:
             new_rows.append({
@@ -74,7 +97,7 @@ def _sync_commute_table(profile: dict, locations: list[dict]) -> pd.DataFrame:
                 "Order": next_order,
                 "Loiter (min)": 0,
                 "Label": loc["label"],
-                "Address": loc["address"],
+                "Address": loc.get("address", ""),
             })
             next_order += 1
 
@@ -154,7 +177,17 @@ This section can be expanded with additional traffic-aware providers
     # Routing Settings (form to avoid reruns)
     # ---------------------------------------------
     labels = [l["label"] for l in locations]
-    default_home = profile.get("home_label") or ("House" if "House" in labels else labels[0])
+    label_to_address = {l["label"]: l.get("address", "") for l in locations}
+    home_labels = [label for label in labels if label.strip().lower().startswith("house")]
+    if not home_labels:
+        st.warning("Add a location labeled **House** to set the Home of Record.")
+        return
+    preferred_home = profile.get("home_label")
+    if preferred_home not in home_labels:
+        preferred_home = home_labels[0]
+        profile["home_label"] = preferred_home
+        st.session_state["commute_profiles"][profile_key] = profile
+    default_home = preferred_home
     routing_options = [
         "OpenRouteService (average traffic)",
         "Google (traffic-aware)",
@@ -183,18 +216,21 @@ This section can be expanded with additional traffic-aware providers
         )
         home_label = st.selectbox(
             "Home of Record (start/end)",
-            options=labels,
-            index=labels.index(default_home) if default_home in labels else 0,
+            options=home_labels,
+            index=home_labels.index(default_home) if default_home in home_labels else 0,
             key=f"home_label_input_{profile_key}",
+            format_func=lambda label: f"{label} — {label_to_address.get(label, 'Unknown address')}",
         )
 
         compute = st.form_submit_button("Compute Commute", type="primary")
 
     if compute:
+        previous_home = st.session_state.get(f"commute_home_label_{profile_key}")
         profile["routing_method"] = routing_method
         profile["departure_time"] = departure_time
         profile["home_label"] = home_label
         st.session_state["commute_profiles"][profile_key] = profile
+        st.session_state[f"commute_home_label_{profile_key}"] = home_label
 
     # Use persisted settings for downstream logic
     routing_method = profile.get("routing_method", routing_options[0])
@@ -214,10 +250,36 @@ This section can be expanded with additional traffic-aware providers
     editor_key = f"commute_table_editor_{profile_key}"
     locations_key = f"commute_locations_key_{profile_key}"
 
-    location_signature = tuple((loc["label"], loc["address"]) for loc in locations)
+    location_signature = tuple(
+        (loc["label"], loc["address"], loc.get("lat"), loc.get("lon"))
+        for loc in locations
+    )
     if st.session_state.get(locations_key) != location_signature:
         st.session_state[table_state_key] = _sync_commute_table(profile, locations)
         st.session_state[locations_key] = location_signature
+        profile["commute_results"] = {}
+        profile["infra"] = {}
+        profile["last_commute_provider"] = None
+        st.session_state["commute_profiles"][profile_key] = profile
+
+    if compute and previous_home and previous_home != home_label:
+        st.session_state[table_state_key] = _sync_commute_table(profile, locations)
+        st.session_state[locations_key] = location_signature
+        profile["commute_results"] = {}
+        profile["infra"] = {}
+        profile["last_commute_provider"] = None
+        st.session_state["commute_profiles"][profile_key] = profile
+        st.session_state.pop(editor_key, None)
+        st.rerun()
+
+    if st.button("Refresh table", key=f"refresh_commute_table_{profile_key}"):
+        st.session_state[table_state_key] = _sync_commute_table(profile, locations)
+        st.session_state[locations_key] = location_signature
+        profile["commute_results"] = {}
+        profile["infra"] = {}
+        profile["last_commute_provider"] = None
+        st.session_state["commute_profiles"][profile_key] = profile
+        st.session_state.pop(editor_key, None)
 
     edited = st.data_editor(
         st.session_state[table_state_key],
@@ -550,6 +612,16 @@ This section can be expanded with additional traffic-aware providers
 
             is_return_leg = seg.get("is_return_leg", False)
             layer_name = f"{provider_key}: {seg['label']}"
+            distance_m = seg.get("distance_m")
+            duration_s = seg.get("duration_s")
+            distance_mi = distance_m / 1609.344 if distance_m is not None else None
+            duration_min = duration_s / 60.0 if duration_s is not None else None
+            tooltip_lines = [layer_name]
+            if distance_mi is not None:
+                tooltip_lines.append(f"Distance: {distance_mi:,.2f} mi")
+            if duration_min is not None:
+                tooltip_lines.append(f"Drive: {duration_min:,.1f} min")
+            tooltip_text = "<br>".join(tooltip_lines)
 
             leg_layer = folium.FeatureGroup(name=layer_name, show=True)
 
@@ -559,7 +631,7 @@ This section can be expanded with additional traffic-aware providers
                     color="#000000",
                     weight=5,
                     opacity=0.9,
-                    tooltip=layer_name,
+                    tooltip=tooltip_text,
                 ).add_to(leg_layer)
             else:
                 folium.PolyLine(
@@ -573,7 +645,7 @@ This section can be expanded with additional traffic-aware providers
                     color="#FFFFFF",
                     weight=4,
                     opacity=0.95,
-                    tooltip=layer_name,
+                    tooltip=tooltip_text,
                 ).add_to(leg_layer)
 
             leg_layer.add_to(m)
@@ -700,5 +772,6 @@ def render_commute():
                 try:
                     save_path = save_current_profile()
                     st.success(f"Saved to {save_path}")
+                    st.rerun()
                 except Exception as exc:
                     st.error(f"Save failed: {exc}")

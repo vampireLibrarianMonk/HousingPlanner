@@ -10,10 +10,11 @@ import streamlit as st
 
 from config.pricing import (
     CLAUDE_INFERENCE_PROFILES,
-    PRICING_REGISTRY,
-    PRICING_VERSION,
     estimate_request_cost,
+    get_llm_pricing_registry,
+    get_pricing_version,
 )
+from profile.costs import _recalculate_costs
 from profile.state_io import auto_save_profile
 from .calculations import monthly_pi_payment
 from .costs import compute_costs_monthly
@@ -73,7 +74,8 @@ def _get_pricing_key_for_profile(profile_id: str) -> str | None:
 def _record_cost(input_tokens: int, output_tokens: int) -> None:
     profile_id = st.session_state.get("mortgage_inference_profile")
     model_key = _get_pricing_key_for_profile(profile_id or "")
-    if not model_key or model_key not in PRICING_REGISTRY:
+    registry = get_llm_pricing_registry()
+    if not model_key or model_key not in registry:
         return
     estimated_cost = estimate_request_cost(model_key, input_tokens, output_tokens)
     st.session_state["mortgage_cost_records"].append(
@@ -84,7 +86,7 @@ def _record_cost(input_tokens: int, output_tokens: int) -> None:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "estimated_cost_usd": round(estimated_cost, 6),
-            "pricing_version": PRICING_VERSION,
+            "pricing_version": get_pricing_version(),
         }
     )
     # Auto-save profile to persist costs
@@ -337,8 +339,8 @@ def render_mortgage_chatbot(
             profile_rows = []
             for profile in CLAUDE_INFERENCE_PROFILES:
                 pricing_key = _get_pricing_key_for_profile(profile.profile_id)
-                if pricing_key and pricing_key in PRICING_REGISTRY:
-                    pricing = PRICING_REGISTRY[pricing_key]
+                if pricing_key and pricing_key in get_llm_pricing_registry():
+                    pricing = get_llm_pricing_registry()[pricing_key]
                     label = (
                         f"{profile.name} "
                         f"(${pricing.input_per_1m:.2f}/1M in, ${pricing.output_per_1m:.2f}/1M out)"
@@ -368,17 +370,8 @@ def render_mortgage_chatbot(
             )
             st.session_state["mortgage_inference_profile"] = selected_profile
 
-        total_input = sum(
-            record.get("input_tokens", 0)
-            for record in st.session_state.get("mortgage_cost_records", [])
-        )
-        total_output = sum(
-            record.get("output_tokens", 0)
-            for record in st.session_state.get("mortgage_cost_records", [])
-        )
-        total_cost = sum(
-            record.get("estimated_cost_usd", 0.0)
-            for record in st.session_state.get("mortgage_cost_records", [])
+        total_input, total_output, total_cost = _recalculate_costs(
+            st.session_state.get("mortgage_cost_records", [])
         )
         st.caption(f"Usage: {total_input} in / {total_output} out · ${total_cost:.6f}")
 

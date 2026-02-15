@@ -126,3 +126,33 @@ def init_state():
 
     if "sun_expanded" not in st.session_state:
         st.session_state["sun_expanded"] = False
+
+    if "zillow_expanded" not in st.session_state:
+        st.session_state["zillow_expanded"] = True
+
+    if "zillow_status" not in st.session_state:
+        st.session_state["zillow_status"] = "Idle / Waiting for input"
+
+    if "zillow_progress" not in st.session_state:
+        st.session_state["zillow_progress"] = 0
+
+    if "zillow_progress_label" not in st.session_state:
+        st.session_state["zillow_progress_label"] = "Idle"
+
+    if "zillow_results" not in st.session_state:
+        st.session_state["zillow_results"] = []
+
+    if "zillow_error" not in st.session_state:
+        st.session_state["zillow_error"] = None
+
+    if "zillow_polygon" not in st.session_state:
+        st.session_state["zillow_polygon"] = None
+
+    if "zillow_polygon_coords" not in st.session_state:
+        st.session_state["zillow_polygon_coords"] = []
+
+    if "zillow_last_query" not in st.session_state:
+        st.session_state["zillow_last_query"] = None
+
+    if "zillow_last_polygon" not in st.session_state:
+        st.session_state["zillow_last_polygon"] = []

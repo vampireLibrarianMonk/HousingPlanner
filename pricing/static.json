@@ -1,0 +1,254 @@
+{
+  "metadata": {
+    "version": "2026-02",
+    "currency": "USD",
+    "last_updated": "2026-02-14T00:00:00Z"
+  },
+  "api_pricing": [
+    {
+      "service": "OpenWebNinja Waze Alerts & Jams",
+      "url": "https://api.openwebninja.com/waze/alerts-and-jams",
+      "unit": "request",
+      "cost_per_request_usd": 0.005,
+      "rate_limit_rps": 10,
+      "free_tier": { "requests": 0, "per": "none" },
+      "notes": "OpenWebNinja Waze alerts and jams pricing"
+    },
+    {
+      "service": "OpenWebNinja Real-Time Zillow Data",
+      "url": "https://api.openwebninja.com/realtime-zillow-data/search",
+      "unit": "request",
+      "cost_per_request_usd": 0.005,
+      "rate_limit_rps": 10,
+      "free_tier": { "requests": 0, "per": "none" },
+      "notes": "OpenWebNinja Zillow search pricing"
+    },
+    {
+      "service": "OpenWebNinja Driving Directions",
+      "url": "https://api.openwebninja.com/driving-directions/get-directions",
+      "unit": "request",
+      "cost_per_request_usd": 0.005,
+      "rate_limit_rps": 5,
+      "free_tier": { "requests": 0, "per": "none" },
+      "notes": "OpenWebNinja driving directions pricing"
+    },
+    {
+      "service": "Google Geocoding API",
+      "url": "https://maps.googleapis.com/maps/api/geocode/json",
+      "unit": "request",
+      "cost_per_request_usd": 0.005,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 10000, "per": "month" },
+      "notes": "Approximate per-call cost using $5/1k after free tier"
+    },
+    {
+      "service": "Google Places API Legacy Autocomplete",
+      "url": "https://maps.googleapis.com/maps/api/place/autocomplete/json",
+      "unit": "request",
+      "cost_per_request_usd": 0.00283,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 10000, "per": "month" },
+      "notes": "Tiered pricing; 2.83/1k up to 100k"
+    },
+    {
+      "service": "Google Places API Legacy Place Details",
+      "url": "https://maps.googleapis.com/maps/api/place/details/json",
+      "unit": "request",
+      "cost_per_request_usd": 0.017,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 5000, "per": "month" },
+      "notes": "Tiered pricing; 17/1k up to 100k"
+    },
+    {
+      "service": "Google Places API Legacy Nearby/Text Search",
+      "url": "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
+      "unit": "request",
+      "cost_per_request_usd": 0.032,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 5000, "per": "month" },
+      "notes": "Tiered pricing; 32/1k up to 100k"
+    },
+    {
+      "service": "Google Places API (New) Autocomplete",
+      "url": "https://places.googleapis.com/v1/places:autocomplete",
+      "unit": "request",
+      "cost_per_request_usd": 0.00283,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 10000, "per": "month" },
+      "notes": "Tiered pricing; 2.83/1k at 10k–100k"
+    },
+    {
+      "service": "Google Places API (New) Place Details Essentials",
+      "url": "https://places.googleapis.com/v1/places/",
+      "unit": "request",
+      "cost_per_request_usd": 0.005,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 10000, "per": "month" },
+      "notes": "Essentials pricing; 5/1k first tier"
+    },
+    {
+      "service": "Google Places API (New) Nearby Search Pro",
+      "url": "https://places.googleapis.com/v1/places:searchNearby",
+      "unit": "request",
+      "cost_per_request_usd": 0.032,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 5000, "per": "month" },
+      "notes": "Pro pricing; 32/1k first tier"
+    },
+    {
+      "service": "Google Routes API Compute Routes Essentials",
+      "url": "https://routes.googleapis.com/directions/v2:computeRoutes",
+      "unit": "request",
+      "cost_per_request_usd": 0.005,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 10000, "per": "month" },
+      "notes": "Essentials pricing; 5/1k first tier"
+    },
+    {
+      "service": "Google Routes API Compute Route Matrix Essentials",
+      "url": "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
+      "unit": "request",
+      "cost_per_request_usd": 0.005,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 10000, "per": "month" },
+      "notes": "Essentials pricing; 5/1k first tier"
+    },
+    {
+      "service": "Google Routes API Compute Routes Pro",
+      "url": "https://routes.googleapis.com/directions/v2:computeRoutes",
+      "unit": "request",
+      "cost_per_request_usd": 0.01,
+      "rate_limit_rps": 0,
+      "free_tier": { "requests": 5000, "per": "month" },
+      "notes": "Pro pricing; 10/1k first tier"
+    }
+  ],
+  "llm_pricing": [
+    {
+      "model_key": "anthropic.claude-haiku-4-5",
+      "model_id": "anthropic.claude-haiku-4-5",
+      "input_per_1m": 1.1,
+      "output_per_1m": 5.5,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-sonnet-4-5",
+      "model_id": "anthropic.claude-sonnet-4-5",
+      "input_per_1m": 3.3,
+      "output_per_1m": 16.5,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-sonnet-4-5-long",
+      "model_id": "anthropic.claude-sonnet-4-5",
+      "input_per_1m": 6.6,
+      "output_per_1m": 24.75,
+      "context": "long"
+    },
+    {
+      "model_key": "anthropic.claude-opus-4-5",
+      "model_id": "anthropic.claude-opus-4-5",
+      "input_per_1m": 5.5,
+      "output_per_1m": 27.5,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-opus-4-1",
+      "model_id": "anthropic.claude-opus-4-1",
+      "input_per_1m": 15.0,
+      "output_per_1m": 75.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-opus-4",
+      "model_id": "anthropic.claude-opus-4",
+      "input_per_1m": 15.0,
+      "output_per_1m": 75.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-sonnet-4",
+      "model_id": "anthropic.claude-sonnet-4",
+      "input_per_1m": 3.0,
+      "output_per_1m": 15.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-sonnet-4-long",
+      "model_id": "anthropic.claude-sonnet-4",
+      "input_per_1m": 6.0,
+      "output_per_1m": 22.5,
+      "context": "long"
+    },
+    {
+      "model_key": "anthropic.claude-3-7-sonnet",
+      "model_id": "anthropic.claude-3-7-sonnet",
+      "input_per_1m": 3.0,
+      "output_per_1m": 15.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-3-5-sonnet",
+      "model_id": "anthropic.claude-3-5-sonnet",
+      "input_per_1m": 3.0,
+      "output_per_1m": 15.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-3-5-haiku",
+      "model_id": "anthropic.claude-3-5-haiku",
+      "input_per_1m": 0.8,
+      "output_per_1m": 4.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-3-5-sonnet-v2",
+      "model_id": "anthropic.claude-3-5-sonnet-v2",
+      "input_per_1m": 3.0,
+      "output_per_1m": 15.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-3-opus",
+      "model_id": "anthropic.claude-3-opus",
+      "input_per_1m": 15.0,
+      "output_per_1m": 75.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-3-haiku",
+      "model_id": "anthropic.claude-3-haiku",
+      "input_per_1m": 0.25,
+      "output_per_1m": 1.25,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-3-sonnet",
+      "model_id": "anthropic.claude-3-sonnet",
+      "input_per_1m": 3.0,
+      "output_per_1m": 15.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-2-1",
+      "model_id": "anthropic.claude-2-1",
+      "input_per_1m": 8.0,
+      "output_per_1m": 24.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-2",
+      "model_id": "anthropic.claude-2",
+      "input_per_1m": 8.0,
+      "output_per_1m": 24.0,
+      "context": "standard"
+    },
+    {
+      "model_key": "anthropic.claude-instant",
+      "model_id": "anthropic.claude-instant",
+      "input_per_1m": 0.8,
+      "output_per_1m": 2.4,
+      "context": "standard"
+    }
+  ]
+}
