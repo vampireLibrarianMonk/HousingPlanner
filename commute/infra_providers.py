@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from config.urls import WAZE_ALERTS_JAMS_URL
+from profile.costs import record_api_usage
 
 
 def fetch_waze_alerts(
@@ -24,6 +25,16 @@ def fetch_waze_alerts(
     headers = {"X-API-Key": api_key}
     resp = requests.get(WAZE_ALERTS_JAMS_URL, params=params, headers=headers, timeout=timeout)
     resp.raise_for_status()
+    record_api_usage(
+        service_key="OpenWebNinja Waze Alerts & Jams",
+        url=WAZE_ALERTS_JAMS_URL,
+        requests=1,
+        metadata={
+            "provider": "waze",
+            "lookup": "traffic alerts",
+            "query": params,
+        },
+    )
     return resp.json()
 
 

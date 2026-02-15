@@ -17,8 +17,21 @@ cdk.out
 # Local profile data
 data/
 
+# Deprecated directories - files now stored in /tmp
+app/
+coverage_test_extracted/
+fcc_cache/
+fcc_downloads/
+
 # JetBrains IDE settings
 .idea
 
 # Reference Materials
 reference
+
+# Git Commit Generator
+git_commit_summary.py
+
+# Archives
+*.zip
+*.gpkg.zip

@@ -240,6 +240,15 @@ def _format_result_row(result: dict) -> dict:
     status = result.get("homeStatus") or result.get("home_status")
     detail_url = result.get("detailUrl") or result.get("url") or result.get("hdpUrl")
     img_url = result.get("imgSrc") or result.get("image") or result.get("photo")
+    whats_special = (
+        result.get("whatsSpecial")
+        or result.get("whats_special")
+        or result.get("specialFeatures")
+        or result.get("special_features")
+        or result.get("highlights")
+        or result.get("homeHighlights")
+        or result.get("listingHighlights")
+    )
     
     city_state_zip = " ".join([p for p in [city, state, zipcode] if p])
     address_label = " · ".join([part for part in [address_line, city_state_zip] if part])
@@ -254,8 +263,40 @@ def _format_result_row(result: dict) -> dict:
         "status": status or "—",
         "detail_url": detail_url,
         "img_url": img_url,
+        "whats_special": whats_special,
         "raw": result,
     }
+
+
+def _render_whats_special(details: Any) -> None:
+    """Render a Zillow-style What's special dropdown if details are provided."""
+    if not details:
+        return
+
+    lines: list[str] = []
+    if isinstance(details, str):
+        lines = [details.strip()] if details.strip() else []
+    elif isinstance(details, list):
+        lines = [str(item).strip() for item in details if str(item).strip()]
+    elif isinstance(details, dict):
+        for key, value in details.items():
+            if value is None or value == "":
+                continue
+            if isinstance(value, list):
+                formatted = ", ".join([str(item).strip() for item in value if str(item).strip()])
+                if formatted:
+                    lines.append(f"{key}: {formatted}")
+            else:
+                lines.append(f"{key}: {value}")
+    else:
+        lines = [str(details).strip()] if str(details).strip() else []
+
+    if not lines:
+        return
+
+    with st.expander("✨ What's special", expanded=False):
+        for line in lines:
+            st.write(f"• {line}")
 
 
 # === Validation ===
@@ -429,25 +470,9 @@ def _execute_polygon_search_with_progress(
     _clear_error()
     st.session_state["zillow_api_metadata"] = None
     
-    # Create placeholders for progressive updates
-    status_text = status_container.empty()
-    progress_bar = status_container.empty()
-    metadata_container = status_container.empty()
-    
     def update_progress(message: str, progress: int, label: str):
         """Update the UI placeholders with current progress."""
         _update_status(message, progress, label)
-        
-        # Determine status icon
-        if progress == 100:
-            icon = "✅"
-        elif progress == 0 and "Error" in message:
-            icon = "❌"
-        else:
-            icon = "🔄"
-        
-        status_text.markdown(f"**{icon} {message}**")
-        progress_bar.progress(progress / 100, text=label)
     
     try:
         # Step 1: Validate
@@ -456,7 +481,6 @@ def _execute_polygon_search_with_progress(
         if validation_errors:
             st.session_state["zillow_error"] = "\n".join(validation_errors)
             update_progress(SearchStatus.ERROR, 0, "Validation Failed")
-            status_container.error("\n".join(validation_errors))
             return
         
         # Step 2: Build query
@@ -491,21 +515,17 @@ def _execute_polygon_search_with_progress(
         st.session_state["zillow_results"] = formatted_results
         st.session_state["zillow_last_query"] = query
         st.session_state["zillow_last_polygon"] = polygon_coords
+        st.session_state["zillow_results_page"] = 1
+        st.session_state["zillow_search_triggered"] = False
         
         # Done
         result_count = len(formatted_results)
         update_progress(SearchStatus.DONE, 100, f"Complete: Found {result_count} properties")
         
-        # Show metadata
-        if api_metadata:
-            with metadata_container.expander("📊 API Response Metadata", expanded=False):
-                st.json(api_metadata)
-        
     except Exception as exc:
         st.session_state["zillow_results"] = []
         st.session_state["zillow_error"] = str(exc)
         update_progress(SearchStatus.ERROR, 0, "Search Failed")
-        status_container.error(f"Search failed: {exc}")
 
 
 # === Main UI Render ===
@@ -863,7 +883,10 @@ def render_zillow_search() -> None:
         
         if search_clicked and can_search:
             st.session_state["zillow_search_triggered"] = True
-            # Execute with progressive updates
+            st.rerun()
+
+        if st.session_state.get("zillow_search_triggered") and can_search:
+            # Execute with progressive updates after session state sync
             _execute_polygon_search_with_progress(params, polygon_coords, status_container)
         
         # === Results Section (Paginated Collapsible) ===
@@ -942,6 +965,8 @@ def render_zillow_search() -> None:
                         
                         with cols[3]:
                             st.caption("Source: Zillow")
+
+                        _render_whats_special(item.get("whats_special"))
                     
                     if idx < len(page_results) - 1:
                         st.divider()

@@ -162,6 +162,8 @@ def compute_commute(
             "points": pts,
             "provider": provider,
             "is_return_leg": i >= return_start_index,
+            "distance_m": dist_m,
+            "duration_s": dur_s,
         })
 
         arrive_dt = current_dt + timedelta(seconds=dur_s)
@@ -182,6 +184,7 @@ def compute_commute(
             "Depart": current_dt.strftime("%H:%M"),
             "Arrive": arrive_dt.strftime("%H:%M"),
             "Drive (min)": round(dur_s / 60.0, 1),
+            "Distance (mi)": round(dist_m / 1609.344, 2),
             "Loiter (min)": loiter_min,
             "Leave": leave_dt.strftime("%H:%M"),
             "Cumulative (min)": round(total_s / 60.0, 1),

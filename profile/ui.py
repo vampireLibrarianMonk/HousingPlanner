@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from .costs import render_usage_costs
+from .costs import render_api_usage_costs, render_usage_costs
 from .identity import (
     ProfileIdentityError,
     get_profile_identity,
@@ -69,6 +69,7 @@ def render_profile_manager() -> None:
 
     # Render consolidated AI usage costs below profile manager
     render_usage_costs()
+    render_api_usage_costs()
 
 
 def save_current_profile() -> str:

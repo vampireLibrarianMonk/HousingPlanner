@@ -42,6 +42,7 @@ ACCOUNT_ID=<your-aws-account-id>
 STORAGE_BUCKET_PREFIX=houseplanner-<your-aws-account-id>
 HOUSE_PLANNER_OWNER_SUB=<cognito-user-sub>
 WAZE_API_KEY=<waze-api-key>
+FCC_API_KEY=<fcc-api-key>
 ```
 
 ## Application Sections

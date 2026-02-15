@@ -56,6 +56,7 @@ def _sync_commute_table(profile: dict, locations: list[dict]) -> pd.DataFrame:
 
     home_label = profile.get("home_label")
     valid_labels = {loc["label"] for loc in locations if loc["label"] != home_label}
+    label_to_address = {loc["label"]: loc.get("address", "") for loc in locations}
 
     if table_df.empty:
         base_rows = []
@@ -76,6 +77,8 @@ def _sync_commute_table(profile: dict, locations: list[dict]) -> pd.DataFrame:
 
     if "Label" in table_df.columns:
         table_df = table_df[table_df["Label"].isin(valid_labels)].copy()
+        if "Address" in table_df.columns:
+            table_df["Address"] = table_df["Label"].map(label_to_address).fillna("")
 
     existing_labels = set(table_df.get("Label", []))
     new_rows = []
@@ -94,7 +97,7 @@ def _sync_commute_table(profile: dict, locations: list[dict]) -> pd.DataFrame:
                 "Order": next_order,
                 "Loiter (min)": 0,
                 "Label": loc["label"],
-                "Address": loc["address"],
+                "Address": loc.get("address", ""),
             })
             next_order += 1
 
@@ -609,6 +612,16 @@ This section can be expanded with additional traffic-aware providers
 
             is_return_leg = seg.get("is_return_leg", False)
             layer_name = f"{provider_key}: {seg['label']}"
+            distance_m = seg.get("distance_m")
+            duration_s = seg.get("duration_s")
+            distance_mi = distance_m / 1609.344 if distance_m is not None else None
+            duration_min = duration_s / 60.0 if duration_s is not None else None
+            tooltip_lines = [layer_name]
+            if distance_mi is not None:
+                tooltip_lines.append(f"Distance: {distance_mi:,.2f} mi")
+            if duration_min is not None:
+                tooltip_lines.append(f"Drive: {duration_min:,.1f} min")
+            tooltip_text = "<br>".join(tooltip_lines)
 
             leg_layer = folium.FeatureGroup(name=layer_name, show=True)
 
@@ -618,7 +631,7 @@ This section can be expanded with additional traffic-aware providers
                     color="#000000",
                     weight=5,
                     opacity=0.9,
-                    tooltip=layer_name,
+                    tooltip=tooltip_text,
                 ).add_to(leg_layer)
             else:
                 folium.PolyLine(
@@ -632,7 +645,7 @@ This section can be expanded with additional traffic-aware providers
                     color="#FFFFFF",
                     weight=4,
                     opacity=0.95,
-                    tooltip=layer_name,
+                    tooltip=tooltip_text,
                 ).add_to(leg_layer)
 
             leg_layer.add_to(m)

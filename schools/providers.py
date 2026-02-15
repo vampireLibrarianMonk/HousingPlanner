@@ -8,6 +8,8 @@ import boto3
 from botocore.exceptions import ClientError
 import requests
 
+from profile.costs import record_api_usage
+
 
 @lru_cache(maxsize=1)
 def _get_secret(secret_name: str) -> str:
@@ -104,6 +106,20 @@ def fetch_google_places_schools(
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=20)
     resp.raise_for_status()
+    record_api_usage(
+        service_key="Google Places API (New) Nearby Search Pro",
+        url=url,
+        requests=1,
+        metadata={
+            "provider": "google_places_new",
+            "endpoint": "searchNearby",
+            "lookup": "schools",
+            "query": {
+                "includedTypes": payload.get("includedTypes"),
+                "locationRestriction": payload.get("locationRestriction"),
+            },
+        },
+    )
     data = resp.json()
     return data.get("places", []) or []
 

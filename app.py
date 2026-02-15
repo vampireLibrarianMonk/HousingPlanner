@@ -101,6 +101,13 @@ from neighborhood.ui import render_neighborhood
 render_neighborhood()
 
 # =============================
+# Service Availability
+# =============================
+from service_availability.ui import render_service_availability
+
+render_service_availability()
+
+# =============================
 # Sun & Light Analysis
 # =============================
 from sun.ui import render_sun

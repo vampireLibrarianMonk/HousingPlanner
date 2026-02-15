@@ -14,13 +14,15 @@ import os
 from functools import lru_cache
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Callable
 import zipfile
 
 import boto3
 from botocore.exceptions import ClientError
 import requests
 import streamlit as st
+
+from profile.costs import record_api_usage
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,8 @@ FCC_BLOCK_URL = "https://broadbandmap.fcc.gov/nbm/map/api/public/census-block"
 FCC_GEOCODE_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 FCC_BDC_BASE_URL = "https://bdc.fcc.gov/api/public"
 FCC_LIST_DATES_URL = f"{FCC_BDC_BASE_URL}/map/listAsOfDates"
+GOOGLE_PLACES_NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+GOOGLE_PLACES_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 
 # Request timeouts (seconds)
 _TIMEOUT_SHORT = 20
@@ -124,6 +128,180 @@ def _distance_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float
     d_lambda = math.radians(lon2 - lon1)
     a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
     return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+ProgressCallback = Callable[[str, int], None]
+
+
+class _ProgressTracker:
+    def __init__(self, *, total_steps: int, progress_cb: ProgressCallback | None) -> None:
+        self.total_steps = max(total_steps, 1)
+        self.progress_cb = progress_cb
+        self.current_step = 0
+
+    def step(self, message: str) -> None:
+        if not self.progress_cb:
+            return
+        self.current_step += 1
+        percent = int((self.current_step / self.total_steps) * 100)
+        self.progress_cb(message, min(100, percent))
+
+
+def _google_places_nearby(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int,
+    keyword: str | None = None,
+    place_type: str | None = None,
+    max_pages: int = 2,
+    progress_step: Callable[[str], None] | None = None,
+    progress_label: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    page_token: str | None = None
+    meta: dict[str, Any] = {
+        "status": None,
+        "error_message": None,
+        "warnings": [],
+        "requests": 0,
+    }
+
+    for page in range(max_pages):
+        if progress_step:
+            label = progress_label or "Google Places"
+            progress_step(f"{label}: fetching page {page + 1}/{max_pages}")
+        params: dict[str, Any] = {
+            "location": f"{lat},{lon}",
+            "radius": radius_meters,
+            "key": api_key,
+        }
+        if keyword:
+            params["keyword"] = keyword
+        if place_type:
+            params["type"] = place_type
+        if page_token:
+            params["pagetoken"] = page_token
+
+        resp = requests.get(GOOGLE_PLACES_NEARBY_URL, params=params, timeout=30)
+        resp.raise_for_status()
+        record_api_usage(
+            service_key="Google Places API Legacy Nearby/Text Search",
+            url=GOOGLE_PLACES_NEARBY_URL,
+            requests=1,
+            metadata={
+                "provider": "google_places_legacy",
+                "endpoint": "nearbysearch",
+                "lookup": "delivery" if keyword in {"USPS", "UPS Store", "FedEx Office", "DHL", "Amazon Locker"} else (
+                    "grocery" if place_type == "grocery_or_supermarket" else (
+                        "pharmacy" if place_type == "pharmacy" else "places"
+                    )
+                ),
+                "query": {
+                    "keyword": keyword,
+                    "place_type": place_type,
+                    "location": f"{lat},{lon}",
+                    "radius_meters": radius_meters,
+                    "page": page + 1,
+                    "page_token": page_token,
+                },
+            },
+        )
+        payload = resp.json() or {}
+        meta["requests"] += 1
+        status = payload.get("status")
+        if meta["status"] is None:
+            meta["status"] = status
+            meta["error_message"] = payload.get("error_message")
+        if status not in ("OK", "ZERO_RESULTS", None):
+            meta["warnings"].append(
+                {
+                    "status": status,
+                    "error_message": payload.get("error_message"),
+                }
+            )
+            if status == "REQUEST_DENIED":
+                break
+        results.extend(payload.get("results") or [])
+        page_token = payload.get("next_page_token")
+        if not page_token:
+            break
+        time.sleep(2)
+    return results, meta
+
+
+def _google_place_details(
+    *,
+    api_key: str,
+    place_id: str,
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
+    if fields is None:
+        fields = ["name", "types", "opening_hours"]
+    resp = requests.get(
+        GOOGLE_PLACES_DETAILS_URL,
+        params={
+            "place_id": place_id,
+            "fields": ",".join(fields),
+            "key": api_key,
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    record_api_usage(
+        service_key="Google Places API Legacy Place Details",
+        url=GOOGLE_PLACES_DETAILS_URL,
+        requests=1,
+        metadata={
+            "provider": "google_places_legacy",
+            "endpoint": "details",
+            "lookup": "place_details",
+            "query": {
+                "place_id": place_id,
+                "fields": fields,
+            },
+        },
+    )
+    payload = resp.json() or {}
+    return payload.get("result") or {}
+
+
+def _has_pharmacy_metadata(name: str | None, types: list[str] | None) -> bool:
+    if types and "pharmacy" in types:
+        return True
+    if not name:
+        return False
+    lowered = name.lower()
+    return any(token in lowered for token in ("pharmacy", "pharm", "rx", "drug"))
+
+
+def _normalize_place_result(
+    *,
+    item: dict[str, Any],
+    lat: float,
+    lon: float,
+    category: str,
+    has_pharmacy: bool | None = None,
+) -> dict[str, Any] | None:
+    loc = (item.get("geometry") or {}).get("location") or {}
+    item_lat = loc.get("lat")
+    item_lon = loc.get("lng")
+    if item_lat is None or item_lon is None:
+        return None
+    return {
+        "category": category,
+        "name": item.get("name"),
+        "lat": item_lat,
+        "lon": item_lon,
+        "rating": item.get("rating"),
+        "open_now": (item.get("opening_hours") or {}).get("open_now"),
+        "distance_miles": _distance_miles(lat, lon, item_lat, item_lon),
+        "place_id": item.get("place_id"),
+        "vicinity": item.get("vicinity"),
+        "types": item.get("types"),
+        "has_pharmacy": has_pharmacy,
+    }
 
 
 def _request_json(
@@ -668,15 +846,15 @@ def fetch_fcc_broadband(
     }
 
 
-@st.cache_data(show_spinner=False, ttl=86400)
-def fetch_delivery_locations(
+def _fetch_delivery_locations(
     *,
     api_key: str,
     lat: float,
     lon: float,
     radius_meters: int = 5000,
+    progress_cb: ProgressCallback | None = None,
+    max_pages: int = 2,
 ) -> list[dict[str, Any]]:
-    url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     carriers = {
         "USPS": "USPS",
         "UPS": "UPS Store",
@@ -685,36 +863,256 @@ def fetch_delivery_locations(
         "Amazon Locker": "Amazon Locker",
     }
     results: list[dict[str, Any]] = []
+    meta_sources: list[dict[str, Any]] = []
+    radius_limit = radius_meters / 1609.34
+    total_steps = max(1, len(carriers) * max_pages)
+    tracker = _ProgressTracker(total_steps=total_steps, progress_cb=progress_cb)
     for carrier, keyword in carriers.items():
-        resp = requests.get(
-            url,
-            params={
-                "location": f"{lat},{lon}",
-                "radius": radius_meters,
-                "keyword": keyword,
-                "key": api_key,
-            },
-            timeout=30,
+        tracker.step(f"{carrier}: starting search")
+        items, meta = _google_places_nearby(
+            api_key=api_key,
+            lat=lat,
+            lon=lon,
+            radius_meters=radius_meters,
+            keyword=keyword,
+            max_pages=max_pages,
+            progress_step=tracker.step,
+            progress_label=carrier,
         )
-        resp.raise_for_status()
-        data = resp.json() or {}
-        for item in data.get("results") or []:
-            loc = (item.get("geometry") or {}).get("location") or {}
-            item_lat = loc.get("lat")
-            item_lon = loc.get("lng")
-            if item_lat is None or item_lon is None:
-                continue
-            results.append(
-                {
-                    "carrier": carrier,
-                    "name": item.get("name"),
-                    "lat": item_lat,
-                    "lon": item_lon,
-                    "rating": item.get("rating"),
-                    "open_now": (item.get("opening_hours") or {}).get("open_now"),
-                    "distance_miles": _distance_miles(lat, lon, item_lat, item_lon),
-                    "place_id": item.get("place_id"),
-                    "vicinity": item.get("vicinity"),
-                }
+        meta_sources.append({
+            "carrier": carrier,
+            "status": meta.get("status"),
+            "error_message": meta.get("error_message"),
+            "warnings": meta.get("warnings"),
+            "requests": meta.get("requests"),
+            "results": len(items),
+        })
+        filtered_out = 0
+        for item in items:
+            normalized = _normalize_place_result(
+                item=item,
+                lat=lat,
+                lon=lon,
+                category=carrier,
             )
-    return results
+            if not normalized:
+                continue
+            if normalized.get("distance_miles") is not None and normalized["distance_miles"] > radius_limit:
+                filtered_out += 1
+                continue
+            normalized["carrier"] = carrier
+            results.append(normalized)
+        meta_sources[-1]["filtered_out"] = filtered_out
+    return {
+        "results": results,
+        "meta": {
+            "sources": meta_sources,
+        },
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def fetch_delivery_locations(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 5000,
+) -> list[dict[str, Any]]:
+    return _fetch_delivery_locations(
+        api_key=api_key,
+        lat=lat,
+        lon=lon,
+        radius_meters=radius_meters,
+    )
+
+
+def fetch_delivery_locations_live(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 5000,
+    progress_cb: ProgressCallback | None = None,
+) -> list[dict[str, Any]]:
+    return _fetch_delivery_locations(
+        api_key=api_key,
+        lat=lat,
+        lon=lon,
+        radius_meters=radius_meters,
+        progress_cb=progress_cb,
+    )
+
+
+def _fetch_grocery_locations(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 5000,
+    progress_cb: ProgressCallback | None = None,
+    max_pages: int = 2,
+) -> list[dict[str, Any]]:
+    tracker = _ProgressTracker(total_steps=max_pages + 1, progress_cb=progress_cb)
+    items, meta = _google_places_nearby(
+        api_key=api_key,
+        lat=lat,
+        lon=lon,
+        radius_meters=radius_meters,
+        place_type="grocery_or_supermarket",
+        keyword="grocery",
+        max_pages=max_pages,
+        progress_step=tracker.step,
+        progress_label="Grocery",
+    )
+    results: list[dict[str, Any]] = []
+    radius_limit = radius_meters / 1609.34
+    filtered_out = 0
+    detail_total = max(1, len(items))
+    detail_tracker = _ProgressTracker(
+        total_steps=detail_total,
+        progress_cb=progress_cb,
+    )
+    for idx, item in enumerate(items, start=1):
+        place_id = item.get("place_id")
+        details = {}
+        if place_id:
+            try:
+                details = _google_place_details(api_key=api_key, place_id=place_id)
+            except Exception:
+                details = {}
+        detail_tracker.step(
+            f"Grocery: details {idx}/{detail_total}"
+        )
+        types = details.get("types") or item.get("types") or []
+        name = details.get("name") or item.get("name")
+        has_pharmacy = _has_pharmacy_metadata(name, types)
+        merged = dict(item)
+        merged["types"] = types
+        if name:
+            merged["name"] = name
+        normalized = _normalize_place_result(
+            item=merged,
+            lat=lat,
+            lon=lon,
+            category="Grocery",
+            has_pharmacy=has_pharmacy,
+        )
+        if normalized:
+            if normalized.get("distance_miles") is not None and normalized["distance_miles"] > radius_limit:
+                filtered_out += 1
+            else:
+                results.append(normalized)
+    return {
+        "results": results,
+        "meta": {**meta, "filtered_out": filtered_out},
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def fetch_grocery_locations(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 5000,
+) -> list[dict[str, Any]]:
+    return _fetch_grocery_locations(
+        api_key=api_key,
+        lat=lat,
+        lon=lon,
+        radius_meters=radius_meters,
+    )
+
+
+def fetch_grocery_locations_live(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 5000,
+    progress_cb: ProgressCallback | None = None,
+) -> list[dict[str, Any]]:
+    return _fetch_grocery_locations(
+        api_key=api_key,
+        lat=lat,
+        lon=lon,
+        radius_meters=radius_meters,
+        progress_cb=progress_cb,
+    )
+
+
+def _fetch_pharmacy_locations(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 5000,
+    progress_cb: ProgressCallback | None = None,
+    max_pages: int = 2,
+) -> list[dict[str, Any]]:
+    tracker = _ProgressTracker(total_steps=max_pages, progress_cb=progress_cb)
+    items, meta = _google_places_nearby(
+        api_key=api_key,
+        lat=lat,
+        lon=lon,
+        radius_meters=radius_meters,
+        place_type="pharmacy",
+        keyword="pharmacy",
+        max_pages=max_pages,
+        progress_step=tracker.step,
+        progress_label="Pharmacy",
+    )
+    results: list[dict[str, Any]] = []
+    radius_limit = radius_meters / 1609.34
+    filtered_out = 0
+    for item in items:
+        normalized = _normalize_place_result(
+            item=item,
+            lat=lat,
+            lon=lon,
+            category="Pharmacy",
+            has_pharmacy=True,
+        )
+        if normalized:
+            if normalized.get("distance_miles") is not None and normalized["distance_miles"] > radius_limit:
+                filtered_out += 1
+            else:
+                results.append(normalized)
+    return {
+        "results": results,
+        "meta": {**meta, "filtered_out": filtered_out},
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def fetch_pharmacy_locations(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 5000,
+) -> list[dict[str, Any]]:
+    return _fetch_pharmacy_locations(
+        api_key=api_key,
+        lat=lat,
+        lon=lon,
+        radius_meters=radius_meters,
+    )
+
+
+def fetch_pharmacy_locations_live(
+    *,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 5000,
+    progress_cb: ProgressCallback | None = None,
+) -> list[dict[str, Any]]:
+    return _fetch_pharmacy_locations(
+        api_key=api_key,
+        lat=lat,
+        lon=lon,
+        radius_meters=radius_meters,
+        progress_cb=progress_cb,
+    )

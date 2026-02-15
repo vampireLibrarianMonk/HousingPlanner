@@ -24,6 +24,20 @@ Create the required secrets:
 
 ```bash
 aws secretsmanager create-secret \
+  --name houseplanner/fcc_api_key \
+  --description "FCC Broadband Map API key" \
+  --secret-string "<fcc-api-key>"
+```
+
+```bash
+aws secretsmanager create-secret \
+  --name houseplanner/fcc_username \
+  --description "FCC Broadband Map Username" \
+  --secret-string "fcc-username"
+```
+
+```bash
+aws secretsmanager create-secret \
   --name houseplanner/ors_api_key \
   --description "OpenRouteService API key for HousePlanner" \
   --secret-string "<ors-api-key>"
@@ -63,13 +77,6 @@ aws secretsmanager create-secret \
   --name houseplanner/schooldigger_api_key \
   --description "SchoolDigger API key for school data enrichment" \
   --secret-string "<schooldigger-api-key>"
-```
-
-```bash
-aws secretsmanager create-secret \
-  --name houseplanner/waze_api_key \
-  --description "Waze (OpenWebNinja) API key for commute incidents" \
-  --secret-string "<waze-api-key>"
 ```
 
 ## Deployment Steps

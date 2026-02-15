@@ -7,6 +7,8 @@ from botocore.exceptions import ClientError
 from geopy.geocoders import Nominatim
 import requests
 
+from profile.costs import record_api_usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +58,16 @@ def _geocode_google(address: str) -> tuple[float, float] | None:
     try:
         resp = requests.get(url, params={"address": address, "key": api_key}, timeout=15)
         resp.raise_for_status()
+        record_api_usage(
+            service_key="Google Geocoding API",
+            url=url,
+            requests=1,
+            metadata={
+                "provider": "google_geocode",
+                "lookup": "geocoding",
+                "query": {"address": address},
+            },
+        )
     except requests.RequestException as exc:
         logger.error("Google geocoding request failed: %s", exc)
         return None

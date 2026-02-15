@@ -7,6 +7,8 @@ import boto3
 from botocore.exceptions import ClientError
 import requests
 
+from profile.costs import record_api_usage
+
 ZILLOW_HOST = "https://api.openwebninja.com"
 ZILLOW_SEARCH_PATH = "/realtime-zillow-data/search"
 ZILLOW_POLYGON_PATH = "/realtime-zillow-data/search-polygon"
@@ -46,4 +48,15 @@ def search_zillow_properties(
     headers = {"x-api-key": api_key}
     resp = requests.get(url, headers=headers, params=params, timeout=timeout)
     resp.raise_for_status()
+    record_api_usage(
+        service_key="OpenWebNinja Real-Time Zillow Data",
+        url=url,
+        requests=1,
+        metadata={
+            "provider": "zillow",
+            "lookup": "listings",
+            "query": params,
+            "use_polygon": use_polygon,
+        },
+    )
     return resp.json()

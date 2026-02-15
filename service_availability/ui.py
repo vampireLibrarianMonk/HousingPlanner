@@ -1,3 +1,4 @@
+
 """Service availability UI for FCC broadband coverage and delivery locations.
 
 Displays interactive maps with FCC BDC broadband coverage data and delivery locations.
@@ -9,6 +10,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import traceback
 from urllib.parse import quote
 
@@ -20,9 +22,11 @@ from streamlit_folium import st_folium
 from locations.logic import _get_loc_by_label
 from .providers import (
     download_fcc_bdc_file,
-    fetch_delivery_locations,
+    fetch_delivery_locations_live,
+    fetch_grocery_locations_live,
     fetch_fcc_bdc_as_of_dates,
     fetch_fcc_bdc_availability_list,
+    fetch_pharmacy_locations_live,
     load_google_maps_api_key,
     load_fcc_credentials,
     load_gpkg_features_for_radius_cached,
@@ -45,6 +49,23 @@ def _format_speed(value: object) -> str:
     if speed is None:
         return "—"
     return f"{speed:,.0f} Mbps"
+
+
+def _filter_by_radius(items: list[dict], radius_miles: float) -> tuple[list[dict], int]:
+    if not items:
+        return [], 0
+    filtered = []
+    removed = 0
+    for item in items:
+        distance = item.get("distance_miles")
+        if distance is None:
+            filtered.append(item)
+            continue
+        if float(distance) <= radius_miles:
+            filtered.append(item)
+        else:
+            removed += 1
+    return filtered, removed
 
 
 def _build_provider_rows(providers: list[dict]) -> list[dict[str, object]]:
@@ -167,12 +188,121 @@ def _tech_color(tech: str | None) -> str:
     return "#546E7A"
 
 
+def _simplify_coverage_features(
+    features: list[dict],
+    *,
+    tolerance: float | None = 0.0001,
+    min_features: int = 5000,
+    center_lat: float | None = None,
+    center_lon: float | None = None,
+    radius_miles: float | None = None,
+) -> tuple[list[dict], dict[str, int]]:
+    """Dissolve + simplify features to keep the interactive map responsive.
+
+    Tolerance uses degrees (~0.0001 ≈ 10-12m). Set to None to preserve exact boundaries.
+    Returns simplified features and stats.
+    """
+    stats = {"raw_features": len(features), "simplified_features": 0}
+    if len(features) < min_features:
+        return features, stats
+    try:
+        import pyproj
+        from shapely.geometry import shape, mapping
+        from shapely.ops import transform, unary_union
+    except Exception:
+        return features, stats
+
+    search_area = None
+    if center_lat is not None and center_lon is not None and radius_miles is not None:
+        to_3857 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
+        house_point_m = transform(to_3857, shape({
+            "type": "Point",
+            "coordinates": [center_lon, center_lat],
+        }))
+        radius_meters = radius_miles * 1609.34
+        search_area = house_point_m.buffer(radius_meters)
+
+    tech_meta = {
+        10: {"name": "DSL", "category": "Fixed", "medium": "Copper", "spectrum": "Wired"},
+        40: {"name": "Cable", "category": "Fixed", "medium": "Cable", "spectrum": "Wired"},
+        50: {"name": "Fiber", "category": "Fixed", "medium": "Fiber", "spectrum": "Wired"},
+        60: {"name": "Satellite", "category": "Fixed", "medium": "Satellite", "spectrum": "Licensed"},
+        70: {"name": "Fixed Wireless", "category": "Fixed", "medium": "Wireless", "spectrum": "Mixed"},
+        71: {"name": "Licensed Fixed Wireless", "category": "Fixed", "medium": "Wireless", "spectrum": "Licensed"},
+        72: {"name": "Unlicensed Fixed Wireless", "category": "Fixed", "medium": "Wireless", "spectrum": "Unlicensed"},
+        300: {"name": "3G Mobile", "category": "Mobile", "medium": "Wireless", "spectrum": "Licensed"},
+        400: {"name": "4G LTE", "category": "Mobile", "medium": "Wireless", "spectrum": "Licensed"},
+        500: {"name": "5G NR", "category": "Mobile", "medium": "Wireless", "spectrum": "Licensed"},
+        0: {"name": "Other", "category": "Unknown", "medium": "Unknown", "spectrum": "Unknown"},
+    }
+    grouped: dict[int, list] = {}
+    for feature in features:
+        props = feature.get("properties") or {}
+        tech_value = props.get("technology") or props.get("technology_code") or 0
+        try:
+            tech_code = int(tech_value)
+        except (TypeError, ValueError):
+            tech_code = 0
+        geom = feature.get("geometry")
+        if not geom:
+            continue
+        try:
+            geom_shape = shape(geom)
+        except Exception:
+            continue
+        if geom_shape.is_empty:
+            continue
+        grouped.setdefault(tech_code, []).append(geom_shape)
+
+    simplified_features: list[dict] = []
+    for tech_code, geoms in grouped.items():
+        if not geoms:
+            continue
+        merged = unary_union(geoms)
+        if search_area is not None:
+            try:
+                to_3857 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
+                to_4326 = pyproj.Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform
+                merged_m = transform(to_3857, merged)
+                merged_m = merged_m.intersection(search_area)
+                merged = transform(to_4326, merged_m)
+            except Exception:
+                pass
+        if tolerance is not None and tolerance > 0:
+            try:
+                merged = merged.simplify(tolerance, preserve_topology=True)
+            except Exception:
+                pass
+        meta = tech_meta.get(tech_code, tech_meta[0])
+        simplified_features.append(
+            {
+                "type": "Feature",
+                "properties": {
+                    "technology": tech_code,
+                    "tech_name": meta["name"],
+                    "tech_category": meta["category"],
+                    "tech_medium": meta["medium"],
+                    "tech_spectrum": meta["spectrum"],
+                    "aggregated": True,
+                },
+                "geometry": mapping(merged),
+            }
+        )
+
+    if simplified_features:
+        stats["simplified_features"] = len(simplified_features)
+        return simplified_features, stats
+    return features, stats
+
+
 def _render_service_map(
     *,
     house: dict,
     layer: str,
     payload: dict,
     radius_miles: float = 10,
+    tech_filter: set[int] | None = None,
+    show_radius: bool = True,
 ) -> None:
     m = folium.Map(
         location=[house["lat"], house["lon"]],
@@ -186,17 +316,42 @@ def _render_service_map(
         icon=folium.Icon(color="red", icon="home"),
     ).add_to(m)
 
-    # Draw search radius circle
-    radius_meters = radius_miles * 1609.34
-    folium.Circle(
-        location=[house["lat"], house["lon"]],
-        radius=radius_meters,
-        color="#1565C0",
-        weight=2,
-        fill=False,
-        dash_array="6,6",
-        tooltip=f"{radius_miles} mile search radius",
-    ).add_to(m)
+    if show_radius:
+        radius_meters = radius_miles * 1609.34
+        try:
+            import pyproj
+            from shapely.geometry import mapping
+            from shapely.ops import transform
+            from shapely.geometry import Point
+
+            to_3857 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
+            to_4326 = pyproj.Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform
+            house_point_m = transform(to_3857, Point(house["lon"], house["lat"]))
+            search_area = house_point_m.buffer(radius_meters)
+            search_area_4326 = transform(to_4326, search_area)
+            folium.GeoJson(
+                {"type": "Feature", "geometry": mapping(search_area_4326)},
+                name="Search Radius",
+                style_function=lambda _: {
+                    "color": "#1565C0",
+                    "weight": 2,
+                    "fillOpacity": 0,
+                    "dashArray": "6,6",
+                },
+                tooltip=f"{radius_miles} mile search radius",
+                control=False,
+                show=True,
+            ).add_to(m)
+        except Exception:
+            folium.Circle(
+                location=[house["lat"], house["lon"]],
+                radius=radius_meters,
+                color="#1565C0",
+                weight=2,
+                fill=False,
+                dash_array="6,6",
+                tooltip=f"{radius_miles} mile search radius",
+            ).add_to(m)
 
     if layer == "Broadband (FCC)":
         # Render clipped coverage features if available
@@ -231,16 +386,20 @@ def _render_service_map(
                     tech_code = 0
                 tech_info = TECH_CODES.get(tech_code, TECH_CODES[0])
                 return {"color": tech_info[1], "weight": 1, "fillColor": tech_info[2], "fillOpacity": 0.4}
-            
-            sample_props = (features[0].get("properties") or {}) if features else {}
+
             tooltip_fields: list[str] = []
             tooltip_aliases: list[str] = []
             candidate_fields = [
                 ("brandname", "Provider"),
                 ("technology", "Tech Code"),
+                ("tech_name", "Technology"),
+                ("tech_category", "Category"),
+                ("tech_medium", "Medium"),
+                ("tech_spectrum", "Spectrum"),
                 ("mindown", "Min Down (Mbps)"),
                 ("minup", "Min Up (Mbps)"),
             ]
+            sample_props = (features[0].get("properties") or {}) if features else {}
             for field, alias in candidate_fields:
                 if field in sample_props:
                     tooltip_fields.append(field)
@@ -254,14 +413,30 @@ def _render_service_map(
                     sticky=True,
                 )
 
-            folium.GeoJson(
-                fcc_coverage,
-                name="FCC Broadband Coverage",
-                style_function=coverage_style,
-                tooltip=tooltip,
-                control=True,
-                show=True,
-            ).add_to(m)
+            # Build separate layers per tech code to expose distinct checkboxes
+            by_tech: dict[int, list[dict]] = {}
+            for feature in features:
+                props = feature.get("properties") or {}
+                tech_value = props.get("technology")
+                try:
+                    tech_code = int(tech_value)
+                except (TypeError, ValueError):
+                    tech_code = 0
+                if tech_filter is not None and tech_code not in tech_filter:
+                    continue
+                by_tech.setdefault(tech_code, []).append(feature)
+
+            for tech_code, tech_features in sorted(by_tech.items(), key=lambda item: item[0]):
+                tech_info = TECH_CODES.get(tech_code, TECH_CODES[0])
+                layer_name = f"{tech_info[0]} (Tech {tech_code})"
+                folium.GeoJson(
+                    {"type": "FeatureCollection", "features": tech_features},
+                    name=layer_name,
+                    style_function=coverage_style,
+                    tooltip=tooltip,
+                    control=True,
+                    show=True,
+                ).add_to(m)
         else:
             # Fallback: just show tech tier circle if no coverage features
             tech_tier = (payload.get("summary") or {}).get("tech_tier")
@@ -289,26 +464,38 @@ def _render_service_map(
         )
         _add_map_legend(m, legend_html)
 
-    elif layer == "Delivery Locations":
-        delivery = payload.get("delivery_locations") or []
-        carrier_colors = {
+    elif layer in {"Delivery Locations", "Grocery", "Pharmacy"}:
+        items = payload.get("delivery_locations") or []
+        if layer == "Grocery":
+            items = payload.get("grocery_locations") or []
+        if layer == "Pharmacy":
+            items = payload.get("pharmacy_locations") or []
+
+        grocery_pharmacy_color = "#6A1B9A"
+        color_map = {
             "USPS": "#1E88E5",
             "UPS": "#6D4C41",
             "FedEx": "#8E24AA",
             "DHL": "#FDD835",
             "Amazon Locker": "#FB8C00",
+            "Grocery": "#2E7D32",
+            "Pharmacy": "#D81B60",
             "Other": "#546E7A",
         }
 
-        group = folium.FeatureGroup(name="Delivery Locations", show=True)
-        for item in delivery:
+        group = folium.FeatureGroup(name=layer, show=True)
+        for item in items:
             lat = item.get("lat")
             lon = item.get("lon")
             if lat is None or lon is None:
                 continue
-            carrier = item.get("carrier") or "Other"
-            color = carrier_colors.get(carrier, carrier_colors["Other"])
-            tooltip = f"{carrier}: {item.get('name') or 'Location'}"
+            category = item.get("carrier") or item.get("category") or "Other"
+            color = color_map.get(category, color_map["Other"])
+            label = item.get("name") or "Location"
+            if layer == "Grocery" and item.get("has_pharmacy"):
+                label = f"{label} (Pharmacy)"
+                color = grocery_pharmacy_color
+            tooltip = f"{category}: {label}"
             folium.CircleMarker(
                 location=[lat, lon],
                 radius=6,
@@ -320,11 +507,23 @@ def _render_service_map(
             ).add_to(group)
         group.add_to(m)
 
-        legend_rows = [
-            "<div style='font-weight:600;margin-bottom:6px;'>Delivery Carriers</div>",
-        ]
-        for carrier, color in carrier_colors.items():
-            legend_rows.append(f"<div><span style='color:{color};'>●</span> {carrier}</div>")
+        legend_rows = [f"<div style='font-weight:600;margin-bottom:6px;'>{layer}</div>"]
+        if layer == "Delivery Locations":
+            for carrier in ["USPS", "UPS", "FedEx", "DHL", "Amazon Locker", "Other"]:
+                legend_rows.append(
+                    f"<div><span style='color:{color_map[carrier]};'>●</span> {carrier}</div>"
+                )
+        elif layer == "Grocery":
+            legend_rows.append(
+                f"<div><span style='color:{color_map['Grocery']};'>●</span> Grocery Store</div>"
+            )
+            legend_rows.append(
+                f"<div><span style='color:{grocery_pharmacy_color};'>●</span> Grocery with Pharmacy</div>"
+            )
+        else:
+            legend_rows.append(
+                f"<div><span style='color:{color_map['Pharmacy']};'>●</span> Pharmacy</div>"
+            )
         _add_map_legend(m, "".join(legend_rows))
 
     else:
@@ -345,6 +544,51 @@ def _render_service_map(
 
     folium.LayerControl(collapsed=False).add_to(m)
     st_folium(m, width=900, height=450, returned_objects=[])
+
+
+def _render_places_summary(
+    *,
+    label: str,
+    meta: dict | None,
+    total_results: int,
+    trimmed: int,
+    radius_miles: float,
+) -> None:
+    if not meta:
+        return
+    st.caption(
+        _places_summary_text(
+            label=label,
+            meta=meta,
+            total_results=total_results,
+            trimmed=trimmed,
+            radius_miles=radius_miles,
+        )
+    )
+
+
+def _places_summary_text(
+    *,
+    label: str,
+    meta: dict | None,
+    total_results: int,
+    trimmed: int,
+    radius_miles: float,
+) -> str:
+    if not meta:
+        return f"{label}: no data"
+    status = meta.get("status")
+    requests = meta.get("requests")
+    if meta.get("sources"):
+        statuses = [source.get("status") for source in meta.get("sources")]
+        status = ",".join(sorted({s for s in statuses if s}))
+        requests = sum(int(source.get("requests") or 0) for source in meta.get("sources"))
+    status_label = status or "Unknown"
+    request_label = f" · requests {requests}" if requests is not None else ""
+    return (
+        f"{label}: status {status_label} · results {total_results} · "
+        f"filtered {trimmed} beyond {radius_miles} mi{request_label}"
+    )
 
 
 def _render_fcc_section(payload: dict) -> None:
@@ -659,6 +903,10 @@ def render_service_availability() -> None:
             st.session_state["service_availability"] = {}
         if "service_delivery_locations" not in st.session_state:
             st.session_state["service_delivery_locations"] = []
+        if "service_grocery_locations" not in st.session_state:
+            st.session_state["service_grocery_locations"] = []
+        if "service_pharmacy_locations" not in st.session_state:
+            st.session_state["service_pharmacy_locations"] = []
 
         # Search radius slider (shared across all tabs)
         radius_miles = st.slider(
@@ -669,10 +917,20 @@ def render_service_availability() -> None:
             step=1,
             key="service_availability_radius_miles",
         )
+        st.caption(
+            "Radius is passed to Google Places for nearby searches. "
+            "Each tab notes how the radius is applied."
+        )
 
         # Create tabs for service layers
-        tab_broadband, tab_delivery, tab_utilities = st.tabs(
-            ["📡 Broadband (FCC)", "📦 Delivery Locations", "⚡ Utilities (Planned)"]
+        tab_broadband, tab_delivery, tab_grocery, tab_pharmacy, tab_utilities = st.tabs(
+            [
+                "📡 Broadband (FCC)",
+                "📦 Delivery Locations",
+                "🛒 Grocery",
+                "💊 Pharmacy",
+                "⚡ Utilities (Planned)",
+            ]
         )
 
         # --- Broadband (FCC) Tab ---
@@ -945,7 +1203,6 @@ def render_service_availability() -> None:
                             from concurrent.futures import ThreadPoolExecutor, as_completed
                             import threading
                             import queue
-                            import time
     
                             all_features = []
                             total_original = 0
@@ -1035,11 +1292,18 @@ def render_service_availability() -> None:
                             st.write(f"  📊 {total_clipped} of {total_original} features within {radius_miles} mile radius")
                             logger.info(f"Step 7: {len(all_features)} total features merged")
                             
+                            simplified_features, simplify_stats = _simplify_coverage_features(
+                                all_features,
+                                center_lat=house.get("lat"),
+                                center_lon=house.get("lon"),
+                                radius_miles=radius_miles,
+                            )
+
                             # Store merged GeoJSON in session state
                             st.session_state["service_availability"] = {
                                 "fcc_coverage_geojson": {
                                     "type": "FeatureCollection",
-                                    "features": all_features,
+                                    "features": simplified_features,
                                 },
                                 "fcc_coverage_stats": {
                                     "files_downloaded": len(successful_downloads),
@@ -1047,14 +1311,15 @@ def render_service_availability() -> None:
                                     "total_features": len(all_features),
                                     "original_features": total_original,
                                     "clipped_features": total_clipped,
+                                    "simplified_features": simplify_stats.get("simplified_features"),
+                                    "raw_features": simplify_stats.get("raw_features"),
                                 },
                                 "radius_miles": radius_miles,
+                                "coverage_simplified": simplify_stats.get("simplified_features", 0) > 0,
                             }
                             
                             progress.progress(100, text="Workflow completed successfully.")
                             status.update(label=f"FCC BDC: {len(all_features)} features from {len(successful_downloads)} files", state="complete")
-                            # Trigger page rerun to display the map with new data
-                            st.rerun()
                         except Exception as exc:
                             logger.error(f"FCC workflow failed: {exc}\n{traceback.format_exc()}")
                             status.update(label="FCC broadband fetch failed", state="error")
@@ -1075,13 +1340,102 @@ def render_service_availability() -> None:
             # Map should appear regardless of whether data was just fetched or already exists
             map_payload_broadband = dict(payload) if payload else {}
             map_payload_broadband["delivery_locations"] = []
-            _render_service_map(house=house, layer="Broadband (FCC)", payload=map_payload_broadband, radius_miles=radius_miles)
+            tech_filter = None
+            fcc_features = (map_payload_broadband.get("fcc_coverage_geojson") or {}).get("features") or []
+            if fcc_features:
+                tech_options = sorted({
+                    int((feature.get("properties") or {}).get("technology") or 0)
+                    for feature in fcc_features
+                })
+                tech_labels = {
+                    10: "DSL",
+                    40: "Cable",
+                    50: "Fiber",
+                    60: "Satellite",
+                    70: "Fixed Wireless",
+                    71: "Licensed Fixed Wireless",
+                    72: "Unlicensed Fixed Wireless",
+                    300: "3G Mobile",
+                    400: "4G LTE",
+                    500: "5G NR",
+                    0: "Other",
+                }
+                default_tech: list[int] = []
+                with st.expander("Legend details", expanded=False):
+                    st.markdown(
+                        """
+**Legend layers** (FCC technology codes):
+- **Fiber (50)**: Fiber-to-the-premises or similar high-capacity fiber service.
+- **Cable (40)**: Cable broadband.
+- **DSL (10)**: Copper/DSL broadband.
+- **Satellite (60)**: Satellite broadband coverage.
+- **Fixed Wireless (70-72)**: Fixed wireless (licensed/unlicensed).
+- **Mobile (300/400/500)**: Mobile broadband (3G/4G/5G NR).
+- **Other (0)**: Uncategorized or unknown technology.
+"""
+                    )
+                allow_multi = st.checkbox(
+                    "Allow multiple overlay layers (may impact performance)",
+                    value=False,
+                    key="fcc_overlay_multi_toggle",
+                )
+                if allow_multi:
+                    selected = st.multiselect(
+                        "Overlay technologies",
+                        options=tech_options,
+                        default=default_tech,
+                        format_func=lambda value: f"{tech_labels.get(value, 'Tech')} ({value})",
+                        key="fcc_overlay_tech_filter",
+                    )
+                    st.caption("Select fewer layers to keep the interactive map responsive.")
+                else:
+                    none_label = "None (select a layer)"
+                    selected_value = st.selectbox(
+                        "Overlay technology",
+                        options=[none_label] + tech_options,
+                        index=0,
+                        format_func=lambda value: (
+                            none_label
+                            if value == none_label
+                            else f"{tech_labels.get(value, 'Tech')} ({value})"
+                        ),
+                        key="fcc_overlay_tech_single",
+                    )
+                    selected = [] if selected_value == none_label else [selected_value]
+                    st.caption("Select one layer at a time for the most stable map rendering.")
+                tech_filter = {int(value) for value in selected} if selected else set()
+            _render_service_map(
+                house=house,
+                layer="Broadband (FCC)",
+                payload=map_payload_broadband,
+                radius_miles=radius_miles,
+                tech_filter=tech_filter,
+            )
             _render_fcc_section(payload)
 
         # --- Delivery Locations Tab ---
         with tab_delivery:
             delivery_locations = st.session_state.get("service_delivery_locations") or []
-            if not delivery_locations:
+            delivery_meta = st.session_state.get("service_delivery_meta") or {}
+            st.caption("Delivery search uses Google Places nearby results for the selected radius.")
+            delivery_status = st.empty()
+            delivery_progress = st.empty()
+            if delivery_meta:
+                delivery_status.caption(
+                    _places_summary_text(
+                        label="Delivery",
+                        meta=delivery_meta,
+                        total_results=len(delivery_locations),
+                        trimmed=0,
+                        radius_miles=radius_miles,
+                    )
+                )
+            delivery_fetch = st.button(
+                "Fetch delivery locations",
+                key="service_delivery_fetch",
+                help="Run UPS/USPS/FedEx/DHL/Amazon Locker search for this address.",
+            )
+            if delivery_fetch:
                 api_key = load_google_maps_api_key()
                 if not api_key:
                     st.error(
@@ -1089,26 +1443,70 @@ def render_service_availability() -> None:
                         "'houseplanner/google_maps_api_key' to enable delivery locations."
                     )
                 else:
+                    progress = st.progress(0, text="Fetching delivery locations...")
+                    delivery_status.caption("Delivery: running search...")
+                    progress_area = delivery_progress.container()
+                    progress_bar = progress_area.progress(0, text="Preparing delivery queries...")
+
+                    def _delivery_progress(message: str, percent: int) -> None:
+                        progress_bar.progress(percent, text=message)
+                        delivery_status.caption(message)
+
                     with st.status("Fetching delivery locations...", expanded=False) as status:
                         try:
-                            delivery_locations = fetch_delivery_locations(
+                            delivery_payload = fetch_delivery_locations_live(
                                 api_key=api_key,
                                 lat=house.get("lat"),
                                 lon=house.get("lon"),
+                                radius_meters=int(radius_miles * 1609.34),
+                                progress_cb=_delivery_progress,
                             )
+                            delivery_locations = delivery_payload.get("results") or []
+                            delivery_meta = delivery_payload.get("meta") or {}
                             st.session_state["service_delivery_locations"] = delivery_locations
+                            st.session_state["service_delivery_meta"] = delivery_meta
+                            progress.progress(100, text="Delivery locations loaded")
+                            delivery_status.caption(
+                                _places_summary_text(
+                                    label="Delivery",
+                                    meta=delivery_meta,
+                                    total_results=len(delivery_locations),
+                                    trimmed=delivery_meta.get("filtered_out") or 0,
+                                    radius_miles=radius_miles,
+                                )
+                            )
+                            delivery_progress.empty()
                             status.update(label="Delivery locations loaded", state="complete")
                         except Exception as exc:
+                            progress.progress(100, text="Delivery fetch failed")
+                            delivery_status.caption("Delivery: fetch failed")
+                            delivery_progress.empty()
                             status.update(label="Delivery fetch failed", state="error")
                             st.error(f"Delivery locations fetch failed: {exc}")
 
             # Render map and section for delivery tab
             map_payload_delivery = {}
+            delivery_locations, delivery_trimmed = _filter_by_radius(
+                delivery_locations, radius_miles
+            )
             map_payload_delivery["delivery_locations"] = delivery_locations
-            _render_service_map(house=house, layer="Delivery Locations", payload=map_payload_delivery, radius_miles=radius_miles)
+            _render_service_map(
+                house=house,
+                layer="Delivery Locations",
+                payload=map_payload_delivery,
+                radius_miles=radius_miles,
+                show_radius=False,
+            )
 
             if delivery_locations:
                 st.markdown("#### Delivery Locations")
+                _render_places_summary(
+                    label="Delivery",
+                    meta=delivery_meta,
+                    total_results=len(delivery_locations),
+                    trimmed=delivery_trimmed,
+                    radius_miles=radius_miles,
+                )
                 rows = []
                 for item in delivery_locations:
                     rows.append(
@@ -1127,12 +1525,249 @@ def render_service_availability() -> None:
                     )
                 st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
             else:
-                st.info("No delivery locations returned for this address.")
+                st.info("Click **Fetch delivery locations** to run the carrier search.")
+                if delivery_meta:
+                    with st.expander("Delivery API diagnostics", expanded=False):
+                        st.json(delivery_meta)
+
+        with tab_grocery:
+            grocery_locations = st.session_state.get("service_grocery_locations") or []
+            grocery_meta = st.session_state.get("service_grocery_meta") or {}
+            st.caption("Grocery search uses Google Places nearby results for the selected radius.")
+            grocery_status = st.empty()
+            grocery_progress = st.empty()
+            if grocery_meta:
+                grocery_status.caption(
+                    _places_summary_text(
+                        label="Grocery",
+                        meta=grocery_meta,
+                        total_results=len(grocery_locations),
+                        trimmed=grocery_meta.get("filtered_out") or 0,
+                        radius_miles=radius_miles,
+                    )
+                )
+            grocery_fetch = st.button(
+                "Fetch grocery locations",
+                key="service_grocery_fetch",
+                help="Search for grocery stores and flag which ones include a pharmacy.",
+            )
+            if grocery_fetch:
+                api_key = load_google_maps_api_key()
+                if not api_key:
+                    st.error(
+                        "Google Maps API key missing. Add the AWS Secrets Manager secret "
+                        "'houseplanner/google_maps_api_key' to enable grocery locations."
+                    )
+                else:
+                    progress = st.progress(0, text="Fetching grocery locations...")
+                    grocery_status.caption("Grocery: running search...")
+                    progress_area = grocery_progress.container()
+                    progress_bar = progress_area.progress(0, text="Preparing grocery queries...")
+
+                    def _grocery_progress(message: str, percent: int) -> None:
+                        progress_bar.progress(percent, text=message)
+                        grocery_status.caption(message)
+
+                    with st.status("Fetching grocery locations...", expanded=False) as status:
+                        try:
+                            grocery_payload = fetch_grocery_locations_live(
+                                api_key=api_key,
+                                lat=house.get("lat"),
+                                lon=house.get("lon"),
+                                radius_meters=int(radius_miles * 1609.34),
+                                progress_cb=_grocery_progress,
+                            )
+                            grocery_locations = grocery_payload.get("results") or []
+                            grocery_meta = grocery_payload.get("meta") or {}
+                            st.session_state["service_grocery_locations"] = grocery_locations
+                            st.session_state["service_grocery_meta"] = grocery_meta
+                            progress.progress(100, text="Grocery locations loaded")
+                            grocery_status.caption(
+                                _places_summary_text(
+                                    label="Grocery",
+                                    meta=grocery_meta,
+                                    total_results=len(grocery_locations),
+                                    trimmed=grocery_meta.get("filtered_out") or 0,
+                                    radius_miles=radius_miles,
+                                )
+                            )
+                            grocery_progress.empty()
+                            status.update(label="Grocery locations loaded", state="complete")
+                        except Exception as exc:
+                            progress.progress(100, text="Grocery fetch failed")
+                            grocery_status.caption("Grocery: fetch failed")
+                            grocery_progress.empty()
+                            status.update(label="Grocery fetch failed", state="error")
+                            st.error(f"Grocery locations fetch failed: {exc}")
+
+            map_payload_grocery = {"grocery_locations": grocery_locations}
+            grocery_locations, grocery_trimmed = _filter_by_radius(
+                grocery_locations, radius_miles
+            )
+            map_payload_grocery["grocery_locations"] = grocery_locations
+            _render_service_map(
+                house=house,
+                layer="Grocery",
+                payload=map_payload_grocery,
+                radius_miles=radius_miles,
+                show_radius=False,
+            )
+
+            if grocery_locations:
+                st.markdown("#### Grocery Locations")
+                _render_places_summary(
+                    label="Grocery",
+                    meta=grocery_meta,
+                    total_results=len(grocery_locations),
+                    trimmed=grocery_trimmed,
+                    radius_miles=radius_miles,
+                )
+                rows = []
+                for item in grocery_locations:
+                    rows.append(
+                        {
+                            "Name": item.get("name"),
+                            "Has Pharmacy": "Yes" if item.get("has_pharmacy") else "No",
+                            "Distance (mi)": (
+                                f"{item.get('distance_miles'):.2f}"
+                                if item.get("distance_miles") is not None
+                                else "—"
+                            ),
+                            "Rating": item.get("rating"),
+                            "Open Now": item.get("open_now"),
+                            "Vicinity": item.get("vicinity"),
+                        }
+                    )
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            else:
+                st.info("Click **Fetch grocery locations** to run the grocery search.")
+                if grocery_meta:
+                    with st.expander("Grocery API diagnostics", expanded=False):
+                        st.json(grocery_meta)
+
+        with tab_pharmacy:
+            pharmacy_locations = st.session_state.get("service_pharmacy_locations") or []
+            pharmacy_meta = st.session_state.get("service_pharmacy_meta") or {}
+            st.caption("Pharmacy search uses Google Places nearby results for the selected radius.")
+            pharmacy_status = st.empty()
+            pharmacy_progress = st.empty()
+            if pharmacy_meta:
+                pharmacy_status.caption(
+                    _places_summary_text(
+                        label="Pharmacy",
+                        meta=pharmacy_meta,
+                        total_results=len(pharmacy_locations),
+                        trimmed=pharmacy_meta.get("filtered_out") or 0,
+                        radius_miles=radius_miles,
+                    )
+                )
+            pharmacy_fetch = st.button(
+                "Fetch pharmacy locations",
+                key="service_pharmacy_fetch",
+                help="Search for standalone pharmacy facilities near this address.",
+            )
+            if pharmacy_fetch:
+                api_key = load_google_maps_api_key()
+                if not api_key:
+                    st.error(
+                        "Google Maps API key missing. Add the AWS Secrets Manager secret "
+                        "'houseplanner/google_maps_api_key' to enable pharmacy locations."
+                    )
+                else:
+                    progress = st.progress(0, text="Fetching pharmacy locations...")
+                    pharmacy_status.caption("Pharmacy: running search...")
+                    progress_area = pharmacy_progress.container()
+                    progress_bar = progress_area.progress(0, text="Preparing pharmacy queries...")
+
+                    def _pharmacy_progress(message: str, percent: int) -> None:
+                        progress_bar.progress(percent, text=message)
+                        pharmacy_status.caption(message)
+
+                    with st.status("Fetching pharmacy locations...", expanded=False) as status:
+                        try:
+                            pharmacy_payload = fetch_pharmacy_locations_live(
+                                api_key=api_key,
+                                lat=house.get("lat"),
+                                lon=house.get("lon"),
+                                radius_meters=int(radius_miles * 1609.34),
+                                progress_cb=_pharmacy_progress,
+                            )
+                            pharmacy_locations = pharmacy_payload.get("results") or []
+                            pharmacy_meta = pharmacy_payload.get("meta") or {}
+                            st.session_state["service_pharmacy_locations"] = pharmacy_locations
+                            st.session_state["service_pharmacy_meta"] = pharmacy_meta
+                            progress.progress(100, text="Pharmacy locations loaded")
+                            pharmacy_status.caption(
+                                _places_summary_text(
+                                    label="Pharmacy",
+                                    meta=pharmacy_meta,
+                                    total_results=len(pharmacy_locations),
+                                    trimmed=pharmacy_meta.get("filtered_out") or 0,
+                                    radius_miles=radius_miles,
+                                )
+                            )
+                            pharmacy_progress.empty()
+                            status.update(label="Pharmacy locations loaded", state="complete")
+                        except Exception as exc:
+                            progress.progress(100, text="Pharmacy fetch failed")
+                            pharmacy_status.caption("Pharmacy: fetch failed")
+                            pharmacy_progress.empty()
+                            status.update(label="Pharmacy fetch failed", state="error")
+                            st.error(f"Pharmacy locations fetch failed: {exc}")
+
+            pharmacy_locations, pharmacy_trimmed = _filter_by_radius(
+                pharmacy_locations, radius_miles
+            )
+            map_payload_pharmacy = {"pharmacy_locations": pharmacy_locations}
+            _render_service_map(
+                house=house,
+                layer="Pharmacy",
+                payload=map_payload_pharmacy,
+                radius_miles=radius_miles,
+                show_radius=False,
+            )
+
+            if pharmacy_locations:
+                st.markdown("#### Pharmacy Locations")
+                _render_places_summary(
+                    label="Pharmacy",
+                    meta=pharmacy_meta,
+                    total_results=len(pharmacy_locations),
+                    trimmed=pharmacy_trimmed,
+                    radius_miles=radius_miles,
+                )
+                rows = []
+                for item in pharmacy_locations:
+                    rows.append(
+                        {
+                            "Name": item.get("name"),
+                            "Distance (mi)": (
+                                f"{item.get('distance_miles'):.2f}"
+                                if item.get("distance_miles") is not None
+                                else "—"
+                            ),
+                            "Rating": item.get("rating"),
+                            "Open Now": item.get("open_now"),
+                            "Vicinity": item.get("vicinity"),
+                        }
+                    )
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            else:
+                st.info("Click **Fetch pharmacy locations** to run the pharmacy search.")
+                if pharmacy_meta:
+                    with st.expander("Pharmacy API diagnostics", expanded=False):
+                        st.json(pharmacy_meta)
 
         # --- Utilities Tab ---
         with tab_utilities:
             # Render map for utilities tab
             map_payload_utilities = {}
             map_payload_utilities["delivery_locations"] = []
-            _render_service_map(house=house, layer="Utilities (Planned)", payload=map_payload_utilities, radius_miles=radius_miles)
+            _render_service_map(
+                house=house,
+                layer="Utilities (Planned)",
+                payload=map_payload_utilities,
+                radius_miles=radius_miles,
+                show_radius=False,
+            )
             st.info("Utility service tiers (power, water, gas) are planned for this layer.")
