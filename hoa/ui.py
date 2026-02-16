@@ -608,11 +608,6 @@ def render_document_vetting() -> None:
             key="hoa_green_analyze",
             disabled=not extraction_ready or is_processing_analysis or not green_page_range_changed,
         )
-        retry_button = st.button(
-            "Retry Textract Polling",
-            key="hoa_textract_retry",
-            disabled=not st.session_state.get("hoa_textract_timeout"),
-        )
 
         # Page range selection (shown when extraction is ready)
         if extraction_ready:
@@ -891,6 +886,12 @@ def render_document_vetting() -> None:
             )
             st.session_state["hoa_processing_analysis"] = False
             st.rerun()
+
+        retry_button = st.button(
+            "Retry Textract Polling",
+            key="hoa_textract_retry",
+            disabled=not st.session_state.get("hoa_textract_timeout"),
+        )
 
         if retry_button:
             job_id = st.session_state.get("hoa_textract_job_id")
