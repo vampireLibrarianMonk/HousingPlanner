@@ -194,9 +194,9 @@ def _get_or_create_target_group(tg_name: str, vpc_id: str) -> dict:
         HealthyThresholdCount=2,
         UnhealthyThresholdCount=2,
     )
-    
+
     tg = resp["TargetGroups"][0]
-    
+
     # Also enable stickiness to keep user on same instance
     elbv2.modify_target_group_attributes(
         TargetGroupArn=tg["TargetGroupArn"],
@@ -206,7 +206,7 @@ def _get_or_create_target_group(tg_name: str, vpc_id: str) -> dict:
             {"Key": "stickiness.lb_cookie.duration_seconds", "Value": "86400"},
         ],
     )
-    
+
     return tg
 
 
@@ -257,7 +257,7 @@ def _ensure_rule(listener_arn: str, user_sub: str, target_group_arn: str) -> Non
     1. Matches requests with the user's routing cookie
     2. Authenticates with OIDC (to ensure session is valid)
     3. Forwards to the user's target group
-    
+
     The routing cookie is set by this Lambda after provisioning.
     This approach works because cookies ARE available during rule condition evaluation,
     unlike the x-amzn-oidc-identity header which is only set after OIDC auth runs.
@@ -276,10 +276,10 @@ def _ensure_rule(listener_arn: str, user_sub: str, target_group_arn: str) -> Non
 
     # Get OIDC config from environment
     client_secret = _get_client_secret()
-    
+
     # Get the routing cookie name for this user
     cookie_name = _routing_cookie_name(user_sub)
-    
+
     # Create rule that matches on the routing cookie
     # The Cookie header contains all cookies, so we use a wildcard pattern
     elbv2.create_rule(
@@ -322,6 +322,41 @@ def _ensure_rule(listener_arn: str, user_sub: str, target_group_arn: str) -> Non
     logger.info("Created rule priority=%s for cookie=%s with OIDC auth", priority, cookie_name)
 
 
+def _find_instances_for_user(
+        user_sub: str,
+        *,
+        retries: int = 3,
+        delay_seconds: float = 2.0,
+) -> list[dict]:
+    """Find EC2 instances for a user with short retries to avoid eventual-consistency races."""
+    instances: list[dict] = []
+    for attempt in range(1, retries + 1):
+        resp = ec2.describe_instances(
+            Filters=[
+                {"Name": "tag:OwnerSub", "Values": [user_sub]},
+                {"Name": "tag:Purpose", "Values": ["HousePlannerUser"]},
+                {
+                    "Name": "instance-state-name",
+                    "Values": ["pending", "running", "stopped", "stopping"],
+                },
+            ]
+        )
+        instances = [
+            i for r in resp.get("Reservations", []) for i in r.get("Instances", [])
+        ]
+        if instances:
+            return instances
+        if attempt < retries:
+            logger.info(
+                "No instances found for user_sub %s (attempt %d/%d); retrying...",
+                user_sub,
+                attempt,
+                retries,
+            )
+            time.sleep(delay_seconds)
+    return instances
+
+
 def lambda_handler(event, context):
     # 1) Confirm identity (provided by ALB authenticate_oidc)
     user_sub = _get_header(event, "x-amzn-oidc-identity")
@@ -344,26 +379,24 @@ def lambda_handler(event, context):
     _ensure_user_bucket(user_sub)
 
     # 2) Find an existing instance (prefer running/pending)
-    resp = ec2.describe_instances(
-        Filters=[
-            {"Name": "tag:OwnerSub", "Values": [user_sub]},
-            {"Name": "tag:Purpose", "Values": ["HousePlannerUser"]},
-            {"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]},
-        ]
-    )
-    instances = [
-        i for r in resp.get("Reservations", []) for i in r.get("Instances", [])
-    ]
+    instances = _find_instances_for_user(user_sub)
 
     def _state_rank(inst):
         s = inst["State"]["Name"]
-        return {"running": 0, "pending": 1, "stopped": 2}.get(s, 99)
+        return {"running": 0, "pending": 1, "stopped": 2, "stopping": 3}.get(s, 99)
 
     instances.sort(key=_state_rank)
 
     # 3) Ensure TG + rule always exist (idempotent)
     tg_name = _tg_name(user_sub, listener_arn)
     tg = _get_or_create_target_group(tg_name, vpc_id)
+
+    existing_rule = _find_existing_rule_for_user(listener_arn, user_sub)
+    if not instances and existing_rule:
+        logger.info(
+            "Rule already exists for user_sub; waiting briefly for instance tags to propagate."
+        )
+        instances = _find_instances_for_user(user_sub, retries=3, delay_seconds=2.0)
 
     # CASE 1 — Instance exists
     if instances:
@@ -384,10 +417,10 @@ def lambda_handler(event, context):
                 resp = ec2.describe_instances(InstanceIds=[instance_id])
                 current_state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
                 if current_state == "running":
-                    logger.info("Instance %s now running after %ds", instance_id, i+1)
+                    logger.info("Instance %s now running after %ds", instance_id, i + 1)
                     break
                 if i % 5 == 0:
-                    logger.info("Instance %s state=%s, waiting... (%d/60)", instance_id, current_state, i+1)
+                    logger.info("Instance %s state=%s, waiting... (%d/60)", instance_id, current_state, i + 1)
                 time.sleep(1)
             else:
                 logger.warning("Instance %s did not reach running in 60s, state=%s", instance_id, current_state)
@@ -433,10 +466,10 @@ def lambda_handler(event, context):
         resp = ec2.describe_instances(InstanceIds=[instance_id])
         current_state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
         if current_state == "running":
-            logger.info("Instance %s now running after %ds, registering with target group", instance_id, i+1)
+            logger.info("Instance %s now running after %ds, registering with target group", instance_id, i + 1)
             break
         if i % 5 == 0:  # Log every 5 seconds to reduce noise
-            logger.info("Instance %s state=%s, waiting... (%d/60)", instance_id, current_state, i+1)
+            logger.info("Instance %s state=%s, waiting... (%d/60)", instance_id, current_state, i + 1)
         time.sleep(1)
     else:
         logger.warning("Instance %s did not reach running state in 60s, current state=%s", instance_id, current_state)
