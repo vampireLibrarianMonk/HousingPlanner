@@ -45,6 +45,8 @@ S3_STAGING_HOURS = 0.25
 HOURS_IN_DAY = 24.0
 HOURS_IN_WEEK = 24.0 * 7
 HOURS_IN_YEAR = 24.0 * 365
+MAX_UPLOAD_MB = 50
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 
 @dataclass
@@ -396,6 +398,12 @@ def render_document_vetting() -> None:
             accept_multiple_files=False,
             key="hoa_document_upload",
         )
+        if upload and upload.size > MAX_UPLOAD_BYTES:
+            st.error(
+                f"The selected PDF is {upload.size / (1024 * 1024):.1f} MB. "
+                f"Please upload a file smaller than {MAX_UPLOAD_MB} MB."
+            )
+            upload = None
 
         retain_col, duration_col, unit_col = st.columns([1.3, 1, 1])
         with retain_col:
