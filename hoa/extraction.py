@@ -77,11 +77,9 @@ def poll_textract_job(
     blocks: List[Dict] = []
     next_token = None
     last_pages = 0
+    status = "UNKNOWN"
     for _ in range(max_polls):
-        if next_token:
-            result = client.get_document_text_detection(JobId=job_id, NextToken=next_token)
-        else:
-            result = client.get_document_text_detection(JobId=job_id)
+        result = client.get_document_text_detection(JobId=job_id)
 
         status = result.get("JobStatus", "UNKNOWN")
         if status == "FAILED":
@@ -95,18 +93,29 @@ def poll_textract_job(
                 if pages_found != last_pages:
                     last_pages = pages_found
                 on_progress(status, last_pages)
-            if not next_token:
-                return blocks
-        else:
-            if on_progress:
-                pages_found = _estimate_pages(blocks)
-                if pages_found != last_pages:
-                    last_pages = pages_found
-                on_progress(status, last_pages)
-            time.sleep(poll_delay_seconds)
-            continue
+            break
 
-    raise TimeoutError("Textract job did not complete in time")
+        if on_progress:
+            pages_found = _estimate_pages(blocks)
+            if pages_found != last_pages:
+                last_pages = pages_found
+            on_progress(status, last_pages)
+        time.sleep(poll_delay_seconds)
+
+    if status != "SUCCEEDED":
+        raise TimeoutError("Textract job did not complete in time")
+
+    while next_token:
+        result = client.get_document_text_detection(JobId=job_id, NextToken=next_token)
+        blocks.extend(result.get("Blocks", []))
+        next_token = result.get("NextToken")
+        if on_progress:
+            pages_found = _estimate_pages(blocks)
+            if pages_found != last_pages:
+                last_pages = pages_found
+            on_progress("SUCCEEDED", last_pages)
+
+    return blocks
 
 
 def cleanup_textract_job(
