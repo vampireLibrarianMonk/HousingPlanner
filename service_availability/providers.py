@@ -542,16 +542,17 @@ def preview_gpkg_layers(*, gpkg_path: str) -> dict[str, Any]:
     if not path.exists():
         return {"ok": False, "error": f"GeoPackage not found: {gpkg_path}"}
     try:
-        import fiona
         import geopandas as gpd
+        import pyogrio
     except Exception as exc:
-        return {"ok": False, "error": f"GeoPandas/Fiona not available: {exc}"}
+        return {"ok": False, "error": f"GeoPandas/Pyogrio not available: {exc}"}
     try:
-        layers = fiona.listlayers(path)
+        layers = pyogrio.list_layers(path)
+        layer_names = [layer[0] if isinstance(layer, (list, tuple)) else layer for layer in layers]
     except Exception as exc:
         return {"ok": False, "error": f"Unable to list layers: {exc}"}
     preview = []
-    for layer in layers:
+    for layer in layer_names:
         try:
             gdf = gpd.read_file(path, layer=layer, rows=5)
             preview.append(
@@ -580,18 +581,19 @@ def run_gpkg_overlay_for_address(
         return {"ok": False, "error": "Failed to geocode address."}
     lat, lon = coords
     try:
-        import fiona
         import geopandas as gpd
+        import pyogrio
         from shapely.geometry import Point
     except Exception as exc:
-        return {"ok": False, "error": f"GeoPandas/Shapely not available: {exc}"}
+        return {"ok": False, "error": f"GeoPandas/Pyogrio/Shapely not available: {exc}"}
     try:
-        layers = fiona.listlayers(path)
+        layers = pyogrio.list_layers(path)
+        layer_names = [layer[0] if isinstance(layer, (list, tuple)) else layer for layer in layers]
     except Exception as exc:
         return {"ok": False, "error": f"Unable to list layers: {exc}"}
-    if not layers:
+    if not layer_names:
         return {"ok": False, "error": "No layers found in GeoPackage."}
-    layer = layers[0]
+    layer = layer_names[0]
     try:
         gdf = gpd.read_file(path, layer=layer)
     except Exception as exc:
@@ -630,18 +632,19 @@ def load_gpkg_features_for_radius(
     if not path.exists():
         return {"ok": False, "error": f"GeoPackage not found: {gpkg_path}"}
     try:
-        import fiona
         import geopandas as gpd
         import pyproj
+        import pyogrio
         from shapely.geometry import Point, mapping
         from shapely.ops import transform
     except Exception as exc:
-        return {"ok": False, "error": f"GeoPandas/Shapely/Pyproj not available: {exc}"}
+        return {"ok": False, "error": f"GeoPandas/Pyogrio/Shapely/Pyproj not available: {exc}"}
     try:
-        layers = fiona.listlayers(path)
+        layers = pyogrio.list_layers(path)
+        layer_names = [layer[0] if isinstance(layer, (list, tuple)) else layer for layer in layers]
     except Exception as exc:
         return {"ok": False, "error": f"Unable to list layers: {exc}"}
-    if not layers:
+    if not layer_names:
         return {"ok": False, "error": "No layers found in GeoPackage."}
 
     # Build search area in meters (EPSG:3857)
@@ -657,7 +660,7 @@ def load_gpkg_features_for_radius(
     all_features = []
     layer_stats = []
 
-    for layer_name in layers:
+    for layer_name in layer_names:
         try:
             gdf = gpd.read_file(path, layer=layer_name)
         except Exception as exc:
