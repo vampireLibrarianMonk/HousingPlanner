@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List
 import os
 import re
+import json
+import time
 
 import streamlit as st
 
@@ -24,6 +26,8 @@ from hoa.extraction import (
     poll_textract_job,
     cleanup_textract_job,
     blocks_to_extraction,
+    extraction_to_payload,
+    payload_to_extraction,
 )
 from profile.identity import (
     get_owner_sub,
@@ -87,6 +91,8 @@ def _ensure_vetting_state() -> None:
         st.session_state["hoa_textract_timeout"] = False
     if "hoa_textract_bucket" not in st.session_state:
         st.session_state["hoa_textract_bucket"] = None
+    if "hoa_extraction_s3_key" not in st.session_state:
+        st.session_state["hoa_extraction_s3_key"] = None
     if "hoa_last_analysis_mode" not in st.session_state:
         st.session_state["hoa_last_analysis_mode"] = "red"
     if "hoa_cost_by_document" not in st.session_state:
@@ -101,6 +107,8 @@ def _ensure_vetting_state() -> None:
         st.session_state["hoa_retention_unit"] = "days"
     if "hoa_storage_class" not in st.session_state:
         st.session_state["hoa_storage_class"] = "Standard"
+    if "hoa_extraction_autosave" not in st.session_state:
+        st.session_state["hoa_extraction_autosave"] = True
     if "hoa_processing_submit" not in st.session_state:
         st.session_state["hoa_processing_submit"] = False
     if "hoa_processing_analysis" not in st.session_state:
@@ -167,6 +175,86 @@ def _list_previous_uploads(bucket_name: str, prefix: str, owner_sub: str | None 
             )
     uploads.sort(key=lambda item: item.get("last_modified") or "", reverse=True)
     return uploads
+
+
+def _sanitize_doc_name(document_name: str) -> str:
+    if not document_name:
+        return "unknown"
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]+", "-", document_name.strip())
+    sanitized = re.sub(r"-+", "-", sanitized).strip("-")
+    return sanitized or "unknown"
+
+
+def _save_extraction_to_s3(
+    *,
+    bucket_name: str,
+    extraction: Any,
+    source: str,
+) -> str | None:
+    if not bucket_name or not extraction:
+        return None
+    s3 = boto3.client("s3")
+    doc_prefix = _sanitize_doc_name(extraction.document_name)
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    key = f"hoa-extractions/{doc_prefix}/{timestamp}.json"
+    payload = extraction_to_payload(extraction, source=source)
+    s3.put_object(
+        Bucket=bucket_name,
+        Key=key,
+        Body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+        Metadata={
+            "page-count": str(len(extraction.pages)),
+            "document-name": extraction.document_name or "",
+        },
+    )
+    return key
+
+
+def _list_saved_extractions(bucket_name: str, prefix: str = "hoa-extractions/") -> List[dict]:
+    if not bucket_name:
+        return []
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    items = []
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj.get("Key")
+            if not key or not key.endswith(".json"):
+                continue
+            parts = key.split("/")
+            doc_part = parts[1] if len(parts) > 2 else "Document"
+            stamp = parts[-1].replace(".json", "")
+            last_modified = obj.get("LastModified")
+            metadata = obj.get("Metadata") or {}
+            page_count = metadata.get("page-count")
+            if not page_count:
+                page_count = "?"
+            timestamp_label = (
+                last_modified.strftime("%Y-%m-%d %H:%M")
+                if last_modified
+                else stamp
+            )
+            items.append(
+                {
+                    "key": key,
+                    "label": f"{doc_part} ({timestamp_label}, {page_count} pages)",
+                    "stamp": stamp,
+                    "last_modified": last_modified,
+                    "page_count": page_count,
+                }
+            )
+    items.sort(key=lambda item: item.get("last_modified") or "", reverse=True)
+    return items
+
+
+def _load_extraction_from_s3(*, bucket_name: str, key: str) -> Any | None:
+    if not bucket_name or not key:
+        return None
+    s3 = boto3.client("s3")
+    obj = s3.get_object(Bucket=bucket_name, Key=key)
+    payload = json.loads(obj["Body"].read())
+    return payload_to_extraction(payload)
 
 
 def _has_duplicate_upload(upload_name: str, uploads: List[dict]) -> bool:
@@ -319,6 +407,128 @@ def _render_cost_breakdown(document_name: str) -> None:
     st.table(rows)
 
 
+def _format_list_items(items: list[str]) -> str:
+    if not items:
+        return ""
+    return "\n".join([f"- {item}" for item in items])
+
+
+def _render_formatted_report(
+    *,
+    structured: dict[str, Any],
+    document_name: str,
+    analysis_type: str,
+    overall_label: str,
+    highlights_title: str,
+    items: list[dict[str, Any]],
+    balanced_considerations: list[str] | None = None,
+) -> str:
+    summary = structured.get("executive_summary", {})
+    summary_text = summary.get("summary", "")
+    overall_value = summary.get(overall_label, "—")
+    community = document_name or "Uploaded HOA Document"
+    items_section = []
+    if items:
+        items_section.append(f"## {highlights_title}\n")
+        for idx, item in enumerate(items, start=1):
+            title = item.get("title", "Highlight")
+            category = item.get("category", "—").title()
+            quoted = item.get("quoted_text", "")
+            explanation = item.get("explanation", "")
+            strength = item.get("strength") or item.get("severity") or "—"
+            pages = ", ".join(str(p) for p in item.get("page_numbers", [])) or "—"
+            items_section.append(
+                "\n".join(
+                    [
+                        f"### {idx}️⃣ {category} · {title}",
+                        f"**Support Level:** {str(strength).title()} · **Pages:** {pages}",
+                        f"_Quote:_ {quoted}" if quoted else "",
+                        explanation,
+                        "",
+                    ]
+                )
+            )
+
+    balanced_text = _format_list_items(balanced_considerations or [])
+    return "\n".join(
+        [
+            "# 🏡 HOA Homeowner Support Review",
+            "",
+            f"**Community:** {community}",
+            f"**Analysis Type:** {analysis_type}",
+            "**Source:** Uploaded HOA Governing Documents Only",
+            "",
+            "## 📊 Executive Overview",
+            "",
+            f"**{analysis_type} Level:** {str(overall_value).upper()}",
+            "",
+            summary_text,
+            "",
+            "---",
+            "",
+            *items_section,
+            "",
+            "## ⚖️ Balanced Considerations",
+            "",
+            balanced_text or "No additional considerations detected.",
+            "",
+            "_This analysis is informational only and not legal advice._",
+        ]
+    ).strip()
+
+
+def _render_analysis_views(
+    *,
+    analysis: Any,
+    is_green: bool,
+    document_name: str,
+) -> None:
+    if not analysis:
+        st.info("No analysis available yet.")
+        return
+    structured = analysis.structured or {}
+    raw_markdown = analysis.markdown or ""
+    raw_text = analysis.raw_text or ""
+    if is_green:
+        items = structured.get("benefits", [])
+        report_md = _render_formatted_report(
+            structured=structured,
+            document_name=document_name,
+            analysis_type="Homeowner Protection & Support Review",
+            overall_label="overall_support",
+            highlights_title="✅ Green Flag Highlights (Homeowner-Friendly Provisions)",
+            items=items,
+        )
+    else:
+        items = structured.get("flags", [])
+        report_md = _render_formatted_report(
+            structured=structured,
+            document_name=document_name,
+            analysis_type="Risk & Restriction Review",
+            overall_label="overall_strictness",
+            highlights_title="🚩 Red Flag Highlights (Potential Risks)",
+            items=items,
+        )
+
+    report_html = f"<div style='white-space: pre-wrap; font-family: inherit;'>{report_md}</div>"
+    report_tab, markdown_tab, json_tab, raw_tab, html_tab = st.tabs(
+        ["Report", "Markdown", "JSON", "Raw Text", "HTML"]
+    )
+    with report_tab:
+        st.markdown(report_md)
+    with markdown_tab:
+        st.text_area("Markdown", value=raw_markdown, height=420)
+    with json_tab:
+        if structured:
+            st.json(structured)
+        else:
+            st.info("No structured JSON available for this analysis.")
+    with raw_tab:
+        st.text_area("Raw Text", value=raw_text or raw_markdown, height=420)
+    with html_tab:
+        st.markdown(report_html, unsafe_allow_html=True)
+
+
 def render_document_vetting() -> None:
     _ensure_vetting_state()
 
@@ -456,6 +666,13 @@ def render_document_vetting() -> None:
             f"Estimated storage rate: ${per_mb_rate:.6f} per MB-month (prorated by retention duration)."
         )
 
+        autosave_extraction = st.checkbox(
+            "Auto-save extracted text",
+            value=st.session_state.get("hoa_extraction_autosave", True),
+            help="Store Textract text in S3 so you can reuse it without rerunning Textract.",
+        )
+        st.session_state["hoa_extraction_autosave"] = autosave_extraction
+
         owner_sub = get_owner_sub()
         bucket_prefix = get_storage_bucket_prefix()
         bucket_name = (
@@ -466,12 +683,15 @@ def render_document_vetting() -> None:
         previous_uploads: List[dict] = []
         selected_previous_key = None
         selected_previous_index = 0
+        saved_extractions: List[dict] = []
+        selected_extraction_key = None
         if bucket_name:
             previous_uploads = _list_previous_uploads(
                 bucket_name,
                 "hoa-uploads/",
                 owner_sub=owner_sub,
             )
+            saved_extractions = _list_saved_extractions(bucket_name)
             if upload and previous_uploads:
                 for idx, item in enumerate(previous_uploads):
                     if item.get("name", "").strip().lower() == upload.name.strip().lower():
@@ -498,6 +718,43 @@ def render_document_vetting() -> None:
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Failed to delete upload: {exc}")
+            if saved_extractions:
+                extraction_labels = {
+                    item["key"]: item["label"]
+                    for item in saved_extractions
+                }
+                selected_extraction_key = st.selectbox(
+                    "Saved extractions",
+                    options=[item["key"] for item in saved_extractions],
+                    format_func=lambda key: extraction_labels.get(key, key),
+                    index=0,
+                )
+                selected_extraction = next(
+                    (item for item in saved_extractions if item["key"] == selected_extraction_key),
+                    None,
+                )
+                if selected_extraction:
+                    st.caption(
+                        f"Saved: {selected_extraction.get('label')} · Key: {selected_extraction.get('key')}"
+                    )
+                confirm_delete = st.checkbox(
+                    "I understand this will permanently delete the saved extraction.",
+                    value=False,
+                    key="hoa_confirm_delete_saved_extraction",
+                )
+                delete_saved_extraction = st.button(
+                    "Delete saved extraction",
+                    key="hoa_delete_saved_extraction",
+                    disabled=not selected_extraction_key or not confirm_delete,
+                )
+                if delete_saved_extraction and selected_extraction_key:
+                    try:
+                        s3 = boto3.client("s3")
+                        s3.delete_object(Bucket=bucket_name, Key=selected_extraction_key)
+                        st.success("Saved extraction deleted.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Failed to delete saved extraction: {exc}")
 
         duplicate_upload = False
         if upload and previous_uploads:
@@ -579,6 +836,11 @@ def render_document_vetting() -> None:
             "Use Selected Upload",
             key="hoa_use_previous",
             disabled=not selected_previous_key or is_processing_submit,
+        )
+        use_saved_extraction_button = st.button(
+            "Use Saved Extraction",
+            key="hoa_use_saved_extraction",
+            disabled=not selected_extraction_key or is_processing_submit,
         )
 
         extraction_ready = st.session_state.get("hoa_extraction") is not None
@@ -710,6 +972,12 @@ def render_document_vetting() -> None:
 
                 extraction = blocks_to_extraction(blocks, upload.name)
                 st.session_state["hoa_extraction"] = extraction
+                if st.session_state.get("hoa_extraction_autosave", True):
+                    st.session_state["hoa_extraction_s3_key"] = _save_extraction_to_s3(
+                        bucket_name=bucket_name,
+                        extraction=extraction,
+                        source="textract_upload",
+                    )
                 page_count = len(extraction.pages)
                 st.success(f"Document type: PDF · Pages detected: {page_count}")
                 context_text = build_page_context(extraction)
@@ -800,6 +1068,12 @@ def render_document_vetting() -> None:
                     matching.get("name", "Uploaded document") if matching else "Uploaded document",
                 )
                 st.session_state["hoa_extraction"] = extraction
+                if st.session_state.get("hoa_extraction_autosave", True):
+                    st.session_state["hoa_extraction_s3_key"] = _save_extraction_to_s3(
+                        bucket_name=bucket_name,
+                        extraction=extraction,
+                        source="textract_previous_upload",
+                    )
                 page_count = len(extraction.pages)
                 st.success(f"Document type: PDF · Pages detected: {page_count}")
 
@@ -887,6 +1161,31 @@ def render_document_vetting() -> None:
             st.session_state["hoa_processing_analysis"] = False
             st.rerun()
 
+        if use_saved_extraction_button and selected_extraction_key:
+            if not bucket_name:
+                st.error("Storage bucket is not configured. Set STORAGE_BUCKET_PREFIX and OwnerSub.")
+            else:
+                try:
+                    stored = _load_extraction_from_s3(
+                        bucket_name=bucket_name,
+                        key=selected_extraction_key,
+                    )
+                    if stored:
+                        st.session_state["hoa_extraction"] = stored
+                        st.session_state["hoa_documents"] = [
+                            {
+                                "name": stored.document_name,
+                                "size": 0,
+                            }
+                        ]
+                        st.session_state["hoa_extraction_s3_key"] = selected_extraction_key
+                        st.success(
+                            f"Loaded saved extraction: {stored.document_name} ({stored.page_count} pages)"
+                        )
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed to load saved extraction: {exc}")
+
         retry_button = st.button(
             "Retry Textract Polling",
             key="hoa_textract_retry",
@@ -928,6 +1227,12 @@ def render_document_vetting() -> None:
 
                     extraction = blocks_to_extraction(blocks, upload.name)
                     st.session_state["hoa_extraction"] = extraction
+                    if st.session_state.get("hoa_extraction_autosave", True):
+                        st.session_state["hoa_extraction_s3_key"] = _save_extraction_to_s3(
+                            bucket_name=bucket_name,
+                            extraction=extraction,
+                            source="textract_retry",
+                        )
                     page_count = len(extraction.pages)
                     st.success(f"Document type: PDF · Pages detected: {page_count}")
                     context_text = build_page_context(extraction)
@@ -966,74 +1271,30 @@ def render_document_vetting() -> None:
             if analysis and green_analysis:
                 red_tab, green_tab = st.tabs(["Red Flags", "Green Flags"])
                 with red_tab:
-                    st.markdown("#### Red-Flag Analysis Summary")
-                    if analysis.structured:
-                        _render_analysis_summary(analysis.structured)
-                    else:
-                        st.text_area(
-                            "Red-Flag Analysis Summary",
-                            value=analysis.markdown,
-                            height=420,
-                            label_visibility="collapsed",
-                        )
-                    with st.expander("Red-Flag Structured JSON", expanded=False):
-                        if analysis.structured:
-                            st.json(analysis.structured)
-                        else:
-                            st.info("No structured JSON was returned. Showing raw output below.")
-                            st.code(analysis.markdown, language="markdown")
+                    _render_analysis_views(
+                        analysis=analysis,
+                        is_green=False,
+                        document_name=doc_name,
+                    )
 
                 with green_tab:
-                    st.markdown("#### Green-Flag Analysis Summary")
-                    if green_analysis.structured:
-                        _render_green_analysis_summary(green_analysis.structured)
-                    else:
-                        st.text_area(
-                            "Green-Flag Analysis Summary",
-                            value=green_analysis.markdown,
-                            height=420,
-                            label_visibility="collapsed",
-                        )
-                    with st.expander("Green-Flag Structured JSON", expanded=False):
-                        if green_analysis.structured:
-                            st.json(green_analysis.structured)
-                        else:
-                            st.info("No structured JSON was returned. Showing raw output below.")
-                            st.code(green_analysis.markdown, language="markdown")
+                    _render_analysis_views(
+                        analysis=green_analysis,
+                        is_green=True,
+                        document_name=doc_name,
+                    )
             elif analysis:
-                st.markdown("#### Red-Flag Analysis Summary")
-                if analysis.structured:
-                    _render_analysis_summary(analysis.structured)
-                else:
-                    st.text_area(
-                        "Red-Flag Analysis Summary",
-                        value=analysis.markdown,
-                        height=420,
-                        label_visibility="collapsed",
-                    )
-                with st.expander("Red-Flag Structured JSON", expanded=False):
-                    if analysis.structured:
-                        st.json(analysis.structured)
-                    else:
-                        st.info("No structured JSON was returned. Showing raw output below.")
-                        st.code(analysis.markdown, language="markdown")
+                _render_analysis_views(
+                    analysis=analysis,
+                    is_green=False,
+                    document_name=doc_name,
+                )
             else:
-                st.markdown("#### Green-Flag Analysis Summary")
-                if green_analysis.structured:
-                    _render_green_analysis_summary(green_analysis.structured)
-                else:
-                    st.text_area(
-                        "Green-Flag Analysis Summary",
-                        value=green_analysis.markdown,
-                        height=420,
-                        label_visibility="collapsed",
-                    )
-                with st.expander("Green-Flag Structured JSON", expanded=False):
-                    if green_analysis.structured:
-                        st.json(green_analysis.structured)
-                    else:
-                        st.info("No structured JSON was returned. Showing raw output below.")
-                        st.code(green_analysis.markdown, language="markdown")
+                _render_analysis_views(
+                    analysis=green_analysis,
+                    is_green=True,
+                    document_name=doc_name,
+                )
 
         if st.session_state.get("hoa_extraction"):
             extraction = st.session_state["hoa_extraction"]

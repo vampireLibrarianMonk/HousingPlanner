@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Callable, Optional, Tuple
 import uuid
 import time
+import json
 
 import boto3
 
@@ -23,6 +24,15 @@ class DocumentExtraction:
 
 
 ProgressCallback = Callable[[str, int], None]
+
+
+@dataclass
+class StoredExtraction:
+    document_name: str
+    pages: List[DocumentPage]
+    page_count: int
+    extracted_at: str
+    source: str
 
 
 def start_textract_job(
@@ -142,6 +152,36 @@ def blocks_to_extraction(blocks: List[Dict], document_name: str) -> DocumentExtr
         for page, lines in sorted(page_map.items())
     ]
     return DocumentExtraction(document_name=document_name, pages=pages)
+
+
+def extraction_to_payload(extraction: DocumentExtraction, *, source: str) -> dict:
+    return {
+        "document_name": extraction.document_name,
+        "page_count": len(extraction.pages),
+        "extracted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": source,
+        "pages": [
+            {"page_number": page.page_number, "text": page.text}
+            for page in extraction.pages
+        ],
+    }
+
+
+def payload_to_extraction(payload: dict) -> StoredExtraction:
+    pages = [
+        DocumentPage(
+            page_number=int(item.get("page_number", 0) or 0),
+            text=item.get("text", ""),
+        )
+        for item in payload.get("pages", [])
+    ]
+    return StoredExtraction(
+        document_name=payload.get("document_name", "Uploaded document"),
+        pages=pages,
+        page_count=payload.get("page_count", len(pages)),
+        extracted_at=payload.get("extracted_at", ""),
+        source=payload.get("source", ""),
+    )
 
 
 def extract_text_with_textract(

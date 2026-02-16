@@ -13,6 +13,7 @@ import boto3
 class AnalysisResult:
     structured: Dict[str, Any]
     markdown: str
+    raw_text: str
     input_tokens: int | None = None
     output_tokens: int | None = None
 
@@ -174,6 +175,7 @@ def analyze_document(
     return AnalysisResult(
         structured=structured,
         markdown=markdown,
+        raw_text=raw,
         input_tokens=usage.get("input_tokens"),
         output_tokens=usage.get("output_tokens"),
     )
@@ -253,6 +255,7 @@ def analyze_document_chunked(
     return AnalysisResult(
         structured=merged,
         markdown=markdown,
+        raw_text=json.dumps(merged, indent=2),
         input_tokens=total_input_tokens or None,
         output_tokens=total_output_tokens or None,
     )
@@ -332,6 +335,7 @@ def analyze_document_chunked_green(
     return AnalysisResult(
         structured=merged,
         markdown=markdown,
+        raw_text=json.dumps(merged, indent=2),
         input_tokens=total_input_tokens or None,
         output_tokens=total_output_tokens or None,
     )
