@@ -229,6 +229,110 @@ def render_usage_costs() -> None:
                     )
 
 
+def record_document_operation(
+    *,
+    operation_type: str,
+    document_name: str,
+    cost_usd: float,
+    metadata: dict | None = None,
+) -> None:
+    """Record a document operation cost (Textract, S3, etc.)."""
+    if cost_usd <= 0:
+        return
+    if "document_operation_records" not in st.session_state:
+        st.session_state["document_operation_records"] = []
+    st.session_state["document_operation_records"].append(
+        {
+            "operation_type": operation_type,
+            "document_name": document_name,
+            "cost_usd": float(cost_usd),
+            "metadata": metadata or {},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    auto_save_profile()
+
+
+def _recalculate_document_operations(records: list[dict]) -> dict:
+    """Calculate totals for document operations."""
+    totals = {
+        "cost_usd": 0.0,
+        "operations": {},
+    }
+    
+    for record in records:
+        op_type = record.get("operation_type", "unknown")
+        cost = float(record.get("cost_usd", 0.0))
+        
+        if op_type not in totals["operations"]:
+            totals["operations"][op_type] = {
+                "type": op_type,
+                "cost_usd": 0.0,
+                "count": 0,
+            }
+        
+        totals["operations"][op_type]["cost_usd"] += cost
+        totals["operations"][op_type]["count"] += 1
+        totals["cost_usd"] += cost
+    
+    return totals
+
+
+def render_document_operations_costs() -> None:
+    """Render document operations cost breakdown in the sidebar."""
+    records = st.session_state.get("document_operation_records", [])
+    stats = _recalculate_document_operations(records)
+    
+    with st.sidebar.expander("📄 Document Operations Costs", expanded=False):
+        if not records or stats["cost_usd"] == 0:
+            st.caption("No document operations recorded yet.")
+            st.markdown(
+                "Costs will appear here for:\n\n"
+                "- AWS Textract (text extraction)\n"
+                "- S3 Storage (document retention)\n"
+                "- S3 Requests (upload/download)"
+            )
+            return
+        
+        st.markdown("### Session Totals")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Cost", f"${stats['cost_usd']:.6f}")
+        with col2:
+            st.metric("Operations", len(records))
+        
+        st.divider()
+        st.markdown("### By Operation Type")
+        
+        for op_type, op_stats in sorted(
+            stats["operations"].items(),
+            key=lambda x: x[1]["cost_usd"],
+            reverse=True,
+        ):
+            label = f"{op_type.replace('_', ' ').title()}"
+            with st.container(border=True):
+                st.markdown(f"**{label}**")
+                st.caption(
+                    f"${op_stats['cost_usd']:.6f} · "
+                    f"{op_stats['count']} operation{'s' if op_stats['count'] != 1 else ''}"
+                )
+        
+        st.divider()
+        st.markdown("### Operation Details")
+        for record in sorted(records, key=lambda item: item.get("timestamp") or "", reverse=True):
+            op_type = record.get("operation_type", "unknown")
+            doc_name = record.get("document_name", "Unknown")
+            cost = record.get("cost_usd", 0.0)
+            timestamp = record.get("timestamp", "Unknown time")
+            metadata = record.get("metadata", {})
+            
+            expander_label = f"{timestamp} · {op_type.replace('_', ' ').title()} · {doc_name}"
+            with st.expander(expander_label, expanded=False):
+                st.caption(f"Cost: ${cost:.6f}")
+                if metadata:
+                    st.json(metadata)
+
+
 def render_api_usage_costs() -> None:
     """Render a dedicated API usage cost breakdown in the sidebar."""
     records = st.session_state.get("api_usage_records", [])

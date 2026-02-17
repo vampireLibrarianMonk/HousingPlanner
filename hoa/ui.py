@@ -17,10 +17,15 @@ from config.pricing import (
     get_llm_pricing_registry,
     get_pricing_version,
 )
-from profile.costs import _recalculate_costs
-from hoa.analysis import analyze_document_chunked, analyze_document_chunked_green, answer_question
+from profile.costs import _recalculate_costs, record_document_operation
+from hoa.analysis import (
+    analyze_document_chunked,
+    analyze_document_chunked_green,
+    answer_question_chunked,
+)
 from hoa.extraction import (
     build_page_context,
+    DocumentExtraction,
     start_textract_job,
     start_textract_job_for_s3_key,
     poll_textract_job,
@@ -60,6 +65,10 @@ class VettingQuery:
     document_name: str
     page_numbers: List[int]
     quoted_text: str
+    confidence: str = "low"
+    not_found: bool = False
+    answer_type: str = "Summary"
+    page_range: tuple[int, int] | None = None
 
 
 def _ensure_vetting_state() -> None:
@@ -113,6 +122,12 @@ def _ensure_vetting_state() -> None:
         st.session_state["hoa_processing_submit"] = False
     if "hoa_processing_analysis" not in st.session_state:
         st.session_state["hoa_processing_analysis"] = False
+    if "hoa_processing_use_previous" not in st.session_state:
+        st.session_state["hoa_processing_use_previous"] = False
+    if "hoa_processing_use_saved" not in st.session_state:
+        st.session_state["hoa_processing_use_saved"] = False
+    if "hoa_processing_followup" not in st.session_state:
+        st.session_state["hoa_processing_followup"] = False
     if "hoa_last_analyzed_red_pages" not in st.session_state:
         st.session_state["hoa_last_analyzed_red_pages"] = None
     if "hoa_last_analyzed_green_pages" not in st.session_state:
@@ -226,10 +241,14 @@ def _list_saved_extractions(bucket_name: str, prefix: str = "hoa-extractions/") 
             doc_part = parts[1] if len(parts) > 2 else "Document"
             stamp = parts[-1].replace(".json", "")
             last_modified = obj.get("LastModified")
-            metadata = obj.get("Metadata") or {}
-            page_count = metadata.get("page-count")
-            if not page_count:
-                page_count = "?"
+            # Fetch metadata using head_object
+            page_count = "?"
+            try:
+                head = s3.head_object(Bucket=bucket_name, Key=key)
+                metadata = head.get("Metadata") or {}
+                page_count = metadata.get("page-count", "?")
+            except Exception:
+                pass
             timestamp_label = (
                 last_modified.strftime("%Y-%m-%d %H:%M")
                 if last_modified
@@ -440,7 +459,7 @@ def _render_formatted_report(
             items_section.append(
                 "\n".join(
                     [
-                        f"### {idx}️⃣ {category} · {title}",
+                        f"### {idx}. {category} · {title}",
                         f"**Support Level:** {str(strength).title()} · **Pages:** {pages}",
                         f"_Quote:_ {quoted}" if quoted else "",
                         explanation,
@@ -715,7 +734,6 @@ def render_document_vetting() -> None:
                         s3 = boto3.client("s3")
                         s3.delete_object(Bucket=bucket_name, Key=selected_key)
                         st.success("Previous upload deleted.")
-                        st.rerun()
                     except Exception as exc:
                         st.error(f"Failed to delete upload: {exc}")
             if saved_extractions:
@@ -752,7 +770,6 @@ def render_document_vetting() -> None:
                         s3 = boto3.client("s3")
                         s3.delete_object(Bucket=bucket_name, Key=selected_extraction_key)
                         st.success("Saved extraction deleted.")
-                        st.rerun()
                     except Exception as exc:
                         st.error(f"Failed to delete saved extraction: {exc}")
 
@@ -815,6 +832,9 @@ def render_document_vetting() -> None:
 
         is_processing_submit = st.session_state.get("hoa_processing_submit", False)
         is_processing_analysis = st.session_state.get("hoa_processing_analysis", False)
+        is_processing_use_previous = st.session_state.get("hoa_processing_use_previous", False)
+        is_processing_use_saved = st.session_state.get("hoa_processing_use_saved", False)
+        is_processing_followup = st.session_state.get("hoa_processing_followup", False)
         
         # Check if this is a new file different from the currently processed one
         current_doc_name = st.session_state.get("hoa_documents", [{}])[0].get("name") if st.session_state.get("hoa_documents") else None
@@ -835,13 +855,298 @@ def render_document_vetting() -> None:
         use_previous_button = st.button(
             "Use Selected Upload",
             key="hoa_use_previous",
-            disabled=not selected_previous_key or is_processing_submit,
+            disabled=not selected_previous_key or is_processing_submit or is_processing_use_previous,
         )
         use_saved_extraction_button = st.button(
             "Use Saved Extraction",
             key="hoa_use_saved_extraction",
-            disabled=not selected_extraction_key or is_processing_submit,
+            disabled=not selected_extraction_key or is_processing_submit or is_processing_use_saved,
         )
+
+        if submit_button and upload and not duplicate_upload:
+            st.session_state["hoa_processing_submit"] = True
+            owner_sub = get_owner_sub()
+            bucket_prefix = get_storage_bucket_prefix()
+            bucket_name = (
+                bucket_name_for_owner(owner_sub, bucket_prefix)
+                if owner_sub and bucket_prefix
+                else None
+            )
+            if not bucket_name:
+                st.error("Storage bucket is not configured. Set STORAGE_BUCKET_PREFIX and OwnerSub.")
+                st.session_state["hoa_processing_submit"] = False
+                return
+            st.session_state["hoa_textract_bucket"] = bucket_name
+
+            s3 = boto3.client("s3")
+            status_placeholder = st.empty()
+            try:
+                s3.head_bucket(Bucket=bucket_name)
+                status_placeholder.success("Bucket ready for use.")
+            except Exception:
+                status_placeholder.warning(
+                    "Bucket does not exist yet. It will be created now."
+                )
+                try:
+                    region = s3.meta.region_name or os.environ.get("AWS_REGION")
+                    if region and region != "us-east-1":
+                        s3.create_bucket(
+                            Bucket=bucket_name,
+                            CreateBucketConfiguration={"LocationConstraint": region},
+                        )
+                    else:
+                        s3.create_bucket(Bucket=bucket_name)
+                    status_placeholder.success("Bucket created and ready for use.")
+                except Exception as exc:
+                    status_placeholder.error(f"Failed to create bucket: {exc}")
+                    st.session_state["hoa_processing_submit"] = False
+                    return
+
+            try:
+                textract_status = st.empty()
+
+                def _on_textract_progress(status: str, pages_found: int) -> None:
+                    message = f"Textract status: {status}"
+                    if pages_found:
+                        message = f"Textract status: {status} · {pages_found} pages detected"
+                    textract_status.info(message)
+
+                with st.spinner("Running Textract..."):
+                    job_id, s3_key = start_textract_job(
+                        upload.getvalue(),
+                        upload.name,
+                        bucket_name=bucket_name,
+                    )
+                    st.session_state["hoa_textract_job_id"] = job_id
+                    st.session_state["hoa_textract_s3_key"] = s3_key
+                    blocks = poll_textract_job(
+                        job_id,
+                        on_progress=_on_textract_progress,
+                        poll_delay_seconds=2.0,
+                        max_polls=180,
+                    )
+
+                if not st.session_state.get("hoa_retain_document"):
+                    cleanup_textract_job(s3_key, bucket_name=bucket_name)
+                    st.session_state["hoa_textract_s3_key"] = None
+
+                st.session_state["hoa_textract_job_id"] = None
+                st.session_state["hoa_textract_status"] = None
+
+                extraction = blocks_to_extraction(blocks, upload.name)
+                st.session_state["hoa_extraction"] = extraction
+                st.session_state["hoa_analysis"] = None
+                st.session_state["hoa_green_analysis"] = None
+                st.session_state["hoa_last_analyzed_red_pages"] = None
+                st.session_state["hoa_last_analyzed_green_pages"] = None
+
+                if st.session_state.get("hoa_extraction_autosave", True):
+                    st.session_state["hoa_extraction_s3_key"] = _save_extraction_to_s3(
+                        bucket_name=bucket_name,
+                        extraction=extraction,
+                        source="textract",
+                    )
+
+                page_count = len(extraction.pages)
+                doc_size = st.session_state.get("hoa_documents", [{}])[0].get("size", 0)
+
+                if st.session_state.get("hoa_retain_document"):
+                    retention_hours = _retention_hours(
+                        st.session_state.get("hoa_retention_amount", 7),
+                        st.session_state.get("hoa_retention_unit", "days"),
+                    )
+                else:
+                    retention_hours = S3_STAGING_HOURS
+
+                storage_cost = _estimate_storage_cost(
+                    doc_size,
+                    retention_hours,
+                    st.session_state.get("hoa_storage_class", "Standard"),
+                )
+                request_cost = ((2 * S3_PUT_REQUEST_PER_1000) + (2 * S3_GET_REQUEST_PER_1000)) / 1000.0
+                textract_cost = page_count * TEXTRACT_TEXT_DETECTION_PER_PAGE
+
+                _set_cost_component(extraction.document_name, "s3_storage", storage_cost)
+                _set_cost_component(extraction.document_name, "s3_requests", request_cost)
+                _set_cost_component(extraction.document_name, "textract", textract_cost)
+
+                record_document_operation(
+                    operation_type="textract",
+                    document_name=extraction.document_name,
+                    cost_usd=textract_cost,
+                    metadata={"pages": page_count},
+                )
+                record_document_operation(
+                    operation_type="s3_storage",
+                    document_name=extraction.document_name,
+                    cost_usd=storage_cost,
+                    metadata={
+                        "size_bytes": doc_size,
+                        "retention_hours": retention_hours,
+                        "storage_class": st.session_state.get("hoa_storage_class", "Standard"),
+                    },
+                )
+                record_document_operation(
+                    operation_type="s3_requests",
+                    document_name=extraction.document_name,
+                    cost_usd=request_cost,
+                    metadata={"operations": "upload+download"},
+                )
+
+                st.success(f"Extraction complete! {page_count} pages extracted.")
+                st.session_state["hoa_processing_submit"] = False
+            except Exception as exc:
+                st.session_state["hoa_processing_submit"] = False
+                st.error(f"Failed to start Textract: {exc}")
+
+        if use_previous_button and selected_previous_key:
+            st.session_state["hoa_processing_use_previous"] = True
+            if not bucket_name:
+                st.error("Storage bucket is not configured. Set STORAGE_BUCKET_PREFIX and OwnerSub.")
+                st.session_state["hoa_processing_use_previous"] = False
+                return
+            st.session_state["hoa_textract_bucket"] = bucket_name
+            st.session_state["hoa_textract_s3_key"] = selected_previous_key
+
+            matching = next(
+                (item for item in previous_uploads if item.get("key") == selected_previous_key),
+                None,
+            )
+            if matching:
+                st.session_state["hoa_documents"] = [
+                    {
+                        "name": matching.get("name", "Uploaded document"),
+                        "size": matching.get("size", 0),
+                    }
+                ]
+
+            try:
+                textract_status = st.empty()
+
+                def _on_textract_progress(status: str, pages_found: int) -> None:
+                    message = f"Textract status: {status}"
+                    if pages_found:
+                        message = f"Textract status: {status} · {pages_found} pages detected"
+                    textract_status.info(message)
+
+                with st.spinner("Running Textract on selected upload..."):
+                    job_id = start_textract_job_for_s3_key(
+                        selected_previous_key,
+                        bucket_name=bucket_name,
+                    )
+                    st.session_state["hoa_textract_job_id"] = job_id
+                    blocks = poll_textract_job(
+                        job_id,
+                        on_progress=_on_textract_progress,
+                        poll_delay_seconds=2.0,
+                        max_polls=180,
+                    )
+
+                if not st.session_state.get("hoa_retain_document"):
+                    cleanup_textract_job(selected_previous_key, bucket_name=bucket_name)
+                    st.session_state["hoa_textract_s3_key"] = None
+
+                st.session_state["hoa_textract_job_id"] = None
+                st.session_state["hoa_textract_status"] = None
+
+                doc_name = st.session_state.get("hoa_documents", [{}])[0].get("name", "document")
+                extraction = blocks_to_extraction(blocks, doc_name)
+                st.session_state["hoa_extraction"] = extraction
+                st.session_state["hoa_analysis"] = None
+                st.session_state["hoa_green_analysis"] = None
+                st.session_state["hoa_last_analyzed_red_pages"] = None
+                st.session_state["hoa_last_analyzed_green_pages"] = None
+
+                if st.session_state.get("hoa_extraction_autosave", True):
+                    st.session_state["hoa_extraction_s3_key"] = _save_extraction_to_s3(
+                        bucket_name=bucket_name,
+                        extraction=extraction,
+                        source="textract",
+                    )
+
+                page_count = len(extraction.pages)
+                doc_size = st.session_state.get("hoa_documents", [{}])[0].get("size", 0)
+
+                if st.session_state.get("hoa_retain_document"):
+                    retention_hours = _retention_hours(
+                        st.session_state.get("hoa_retention_amount", 7),
+                        st.session_state.get("hoa_retention_unit", "days"),
+                    )
+                else:
+                    retention_hours = S3_STAGING_HOURS
+
+                storage_cost = _estimate_storage_cost(
+                    doc_size,
+                    retention_hours,
+                    st.session_state.get("hoa_storage_class", "Standard"),
+                )
+                request_cost = ((2 * S3_PUT_REQUEST_PER_1000) + (2 * S3_GET_REQUEST_PER_1000)) / 1000.0
+                textract_cost = page_count * TEXTRACT_TEXT_DETECTION_PER_PAGE
+
+                _set_cost_component(extraction.document_name, "s3_storage", storage_cost)
+                _set_cost_component(extraction.document_name, "s3_requests", request_cost)
+                _set_cost_component(extraction.document_name, "textract", textract_cost)
+
+                record_document_operation(
+                    operation_type="textract",
+                    document_name=extraction.document_name,
+                    cost_usd=textract_cost,
+                    metadata={"pages": page_count},
+                )
+                record_document_operation(
+                    operation_type="s3_storage",
+                    document_name=extraction.document_name,
+                    cost_usd=storage_cost,
+                    metadata={
+                        "size_bytes": doc_size,
+                        "retention_hours": retention_hours,
+                        "storage_class": st.session_state.get("hoa_storage_class", "Standard"),
+                    },
+                )
+                record_document_operation(
+                    operation_type="s3_requests",
+                    document_name=extraction.document_name,
+                    cost_usd=request_cost,
+                    metadata={"operations": "upload+download"},
+                )
+
+                st.success(f"Extraction complete! {page_count} pages extracted.")
+                st.session_state["hoa_processing_use_previous"] = False
+            except Exception as exc:
+                st.session_state["hoa_processing_use_previous"] = False
+                st.error(f"Failed to start Textract: {exc}")
+
+        if use_saved_extraction_button and selected_extraction_key:
+            if not bucket_name:
+                st.error("Storage bucket is not configured. Set STORAGE_BUCKET_PREFIX and OwnerSub.")
+                st.session_state["hoa_processing_use_saved"] = False
+            else:
+                try:
+                    st.session_state["hoa_processing_use_saved"] = True
+                    stored = _load_extraction_from_s3(
+                        bucket_name=bucket_name,
+                        key=selected_extraction_key,
+                    )
+                    if stored:
+                        st.session_state["hoa_extraction"] = stored
+                        st.session_state["hoa_analysis"] = None
+                        st.session_state["hoa_green_analysis"] = None
+                        st.session_state["hoa_last_analyzed_red_pages"] = None
+                        st.session_state["hoa_last_analyzed_green_pages"] = None
+                        st.session_state["hoa_documents"] = [
+                            {
+                                "name": stored.document_name,
+                                "size": 0,
+                            }
+                        ]
+                        st.session_state["hoa_extraction_s3_key"] = selected_extraction_key
+                        st.success(
+                            f"Loaded saved extraction: {stored.document_name} ({stored.page_count} pages)"
+                        )
+                        st.session_state["hoa_processing_use_saved"] = False
+                except Exception as exc:
+                    st.session_state["hoa_processing_use_saved"] = False
+                    st.error(f"Failed to load saved extraction: {exc}")
 
         extraction_ready = st.session_state.get("hoa_extraction") is not None
         
@@ -898,440 +1203,182 @@ def render_document_vetting() -> None:
             if range_start > range_end:
                 st.warning("Start page cannot be greater than end page.")
 
-        if submit_button and upload and not duplicate_upload:
-            st.session_state["hoa_processing_submit"] = True
-            owner_sub = get_owner_sub()
-            bucket_prefix = get_storage_bucket_prefix()
-            bucket_name = (
-                bucket_name_for_owner(owner_sub, bucket_prefix)
-                if owner_sub and bucket_prefix
-                else None
-            )
-            if not bucket_name:
-                st.error("Storage bucket is not configured. Set STORAGE_BUCKET_PREFIX and OwnerSub.")
-                return
-            st.session_state["hoa_textract_bucket"] = bucket_name
-
-            s3 = boto3.client("s3")
-            status_placeholder = st.empty()
-            try:
-                s3.head_bucket(Bucket=bucket_name)
-                status_placeholder.success("Bucket ready for use.")
-            except Exception:
-                status_placeholder.warning(
-                    "Bucket does not exist yet. It will be created now."
-                )
-                try:
-                    region = s3.meta.region_name or os.environ.get("AWS_REGION")
-                    if region and region != "us-east-1":
-                        s3.create_bucket(
-                            Bucket=bucket_name,
-                            CreateBucketConfiguration={"LocationConstraint": region},
-                        )
-                    else:
-                        s3.create_bucket(Bucket=bucket_name)
-                    status_placeholder.success("Bucket created and ready for use.")
-                except Exception as exc:
-                    status_placeholder.error(f"Failed to create bucket: {exc}")
-                    return
-
-            try:
-                with st.spinner("Uploading document to Textract..."):
-                    job_id, s3_key = start_textract_job(
-                        upload.getvalue(),
-                        upload.name,
-                        bucket_name=bucket_name,
-                    )
-                st.session_state["hoa_textract_job_id"] = job_id
-                st.session_state["hoa_textract_s3_key"] = s3_key
-                st.session_state["hoa_textract_timeout"] = False
-                st.session_state["hoa_textract_pages"] = 0
-
-                status_placeholder = st.empty()
-                progress_placeholder = st.empty()
-
-                def _on_progress(status: str, pages: int) -> None:
-                    st.session_state["hoa_textract_status"] = status
-                    st.session_state["hoa_textract_pages"] = pages
-                    status_placeholder.info(f"Textract status: {status}")
-                    progress_placeholder.caption(
-                        f"Pages detected so far: {pages}"
-                    )
-
-                with st.spinner("Extracting text with Textract..."):
-                    blocks = poll_textract_job(
-                        job_id,
-                        poll_delay_seconds=2.0,
-                        max_polls=120,
-                        on_progress=_on_progress,
-                    )
-                if not st.session_state.get("hoa_retain_document"):
-                    cleanup_textract_job(s3_key, bucket_name=bucket_name)
-                    st.session_state["hoa_textract_s3_key"] = None
-                st.session_state["hoa_textract_job_id"] = None
-
-                extraction = blocks_to_extraction(blocks, upload.name)
-                st.session_state["hoa_extraction"] = extraction
-                if st.session_state.get("hoa_extraction_autosave", True):
-                    st.session_state["hoa_extraction_s3_key"] = _save_extraction_to_s3(
-                        bucket_name=bucket_name,
-                        extraction=extraction,
-                        source="textract_upload",
-                    )
-                page_count = len(extraction.pages)
-                st.success(f"Document type: PDF · Pages detected: {page_count}")
+        if analyze_button or green_button:
+            if not st.session_state.get("hoa_extraction"):
+                st.warning("Upload and submit a document before running analysis.")
+            else:
+                st.session_state["hoa_processing_analysis"] = True
+                extraction = st.session_state.get("hoa_extraction")
                 context_text = build_page_context(extraction)
                 doc_name = extraction.document_name
-                doc_size = st.session_state.get("hoa_documents", [{}])[0].get("size", 0)
-                if st.session_state.get("hoa_retain_document"):
-                    retention_hours = _retention_hours(
-                        st.session_state.get("hoa_retention_amount", 7),
-                        st.session_state.get("hoa_retention_unit", "days"),
-                    )
+                model_id = st.session_state.get("hoa_inference_profile")
+                analysis_status = st.empty()
+
+                def _on_analysis_progress(current: int, total: int) -> None:
+                    analysis_status.info(f"Analyzing chunk {current} of {total}...")
+
+                # Get current page range for tracking
+                analysis_page_start = st.session_state.get("hoa_page_start", 1)
+                analysis_page_end = st.session_state.get("hoa_page_end", len(extraction.pages))
+                analysis_page_range = (analysis_page_start, analysis_page_end)
+                
+                if analyze_button:
+                    with st.spinner("Running red-flag analysis..."):
+                        analysis = analyze_document_chunked(
+                            [page.text for page in extraction.pages],
+                            model_id=model_id,
+                            on_progress=_on_analysis_progress,
+                        )
+                    st.session_state["hoa_last_analysis_mode"] = "red"
+                    st.session_state["hoa_analysis"] = analysis
+                    st.session_state["hoa_last_analyzed_red_pages"] = analysis_page_range
                 else:
-                    retention_hours = S3_STAGING_HOURS
-                storage_cost = _estimate_storage_cost(
-                    doc_size,
-                    retention_hours,
-                    st.session_state.get("hoa_storage_class", "Standard"),
-                )
-                request_cost = ((2 * S3_PUT_REQUEST_PER_1000) + (2 * S3_GET_REQUEST_PER_1000)) / 1000.0
-                textract_cost = page_count * TEXTRACT_TEXT_DETECTION_PER_PAGE
-                _set_cost_component(doc_name, "s3_storage", storage_cost)
-                _set_cost_component(doc_name, "s3_requests", request_cost)
-                _set_cost_component(doc_name, "textract", textract_cost)
-
-                st.session_state["hoa_processing_submit"] = False
-                st.rerun()
-            except TimeoutError:
-                st.session_state["hoa_textract_timeout"] = True
-                st.session_state["hoa_processing_submit"] = False
-                st.warning(
-                    "Textract is still processing. Click 'Retry Textract Polling' to continue without re-uploading."
-                )
-            except Exception as exc:
-                st.session_state["hoa_processing_submit"] = False
-                st.error(f"Textract failed: {exc}")
-
-        if use_previous_button and selected_previous_key:
-            st.session_state["hoa_processing_submit"] = True
-            if not bucket_name:
-                st.error("Storage bucket is not configured. Set STORAGE_BUCKET_PREFIX and OwnerSub.")
-                return
-            st.session_state["hoa_textract_bucket"] = bucket_name
-            st.session_state["hoa_textract_s3_key"] = selected_previous_key
-
-            matching = next(
-                (item for item in previous_uploads if item.get("key") == selected_previous_key),
-                None,
-            )
-            if matching:
-                st.session_state["hoa_documents"] = [
-                    {
-                        "name": matching.get("name", "Uploaded document"),
-                        "size": matching.get("size", 0),
-                    }
-                ]
-
-            status_placeholder = st.empty()
-            progress_placeholder = st.empty()
-            try:
-                with st.spinner("Starting Textract on selected upload..."):
-                    job_id = start_textract_job_for_s3_key(
-                        selected_previous_key,
-                        bucket_name=bucket_name,
-                    )
-                st.session_state["hoa_textract_job_id"] = job_id
-                st.session_state["hoa_textract_timeout"] = False
-                st.session_state["hoa_textract_pages"] = 0
-
-                def _on_progress(status: str, pages: int) -> None:
-                    st.session_state["hoa_textract_status"] = status
-                    st.session_state["hoa_textract_pages"] = pages
-                    status_placeholder.info(f"Textract status: {status}")
-                    progress_placeholder.caption(
-                        f"Pages detected so far: {pages}"
-                    )
-
-                with st.spinner("Extracting text with Textract..."):
-                    blocks = poll_textract_job(
-                        job_id,
-                        poll_delay_seconds=2.0,
-                        max_polls=120,
-                        on_progress=_on_progress,
-                    )
-                st.session_state["hoa_textract_job_id"] = None
-                st.session_state["hoa_textract_timeout"] = False
-
-                extraction = blocks_to_extraction(
-                    blocks,
-                    matching.get("name", "Uploaded document") if matching else "Uploaded document",
-                )
-                st.session_state["hoa_extraction"] = extraction
-                if st.session_state.get("hoa_extraction_autosave", True):
-                    st.session_state["hoa_extraction_s3_key"] = _save_extraction_to_s3(
-                        bucket_name=bucket_name,
-                        extraction=extraction,
-                        source="textract_previous_upload",
-                    )
-                page_count = len(extraction.pages)
-                st.success(f"Document type: PDF · Pages detected: {page_count}")
-
-                doc_name = extraction.document_name
-                doc_size = st.session_state.get("hoa_documents", [{}])[0].get("size", 0)
-                if st.session_state.get("hoa_retain_document"):
-                    retention_hours = _retention_hours(
-                        st.session_state.get("hoa_retention_amount", 7),
-                        st.session_state.get("hoa_retention_unit", "days"),
-                    )
-                else:
-                    retention_hours = S3_STAGING_HOURS
-                storage_cost = _estimate_storage_cost(
-                    doc_size,
-                    retention_hours,
-                    st.session_state.get("hoa_storage_class", "Standard"),
-                )
-                request_cost = ((2 * S3_PUT_REQUEST_PER_1000) + (2 * S3_GET_REQUEST_PER_1000)) / 1000.0
-                textract_cost = page_count * TEXTRACT_TEXT_DETECTION_PER_PAGE
-                _set_cost_component(doc_name, "s3_storage", storage_cost)
-                _set_cost_component(doc_name, "s3_requests", request_cost)
-                _set_cost_component(doc_name, "textract", textract_cost)
-
-                st.rerun()
-            except TimeoutError:
-                st.session_state["hoa_textract_timeout"] = True
-                st.warning(
-                    "Textract is still processing. Click 'Retry Textract Polling' to continue without re-uploading."
-                )
-            except Exception as exc:
-                st.error(f"Textract failed: {exc}")
-
-        if (analyze_button or green_button) and not st.session_state.get("hoa_extraction"):
-            st.warning("Upload and submit a document before running analysis.")
-            return
-
-        if (analyze_button or green_button) and st.session_state.get("hoa_extraction"):
-            st.session_state["hoa_processing_analysis"] = True
-            extraction = st.session_state.get("hoa_extraction")
-            context_text = build_page_context(extraction)
-            doc_name = extraction.document_name
-            model_id = st.session_state.get("hoa_inference_profile")
-            analysis_status = st.empty()
-
-            def _on_analysis_progress(current: int, total: int) -> None:
-                analysis_status.info(f"Analyzing chunk {current} of {total}...")
-
-            # Get current page range for tracking
-            analysis_page_start = st.session_state.get("hoa_page_start", 1)
-            analysis_page_end = st.session_state.get("hoa_page_end", len(extraction.pages))
-            analysis_page_range = (analysis_page_start, analysis_page_end)
-            
-            if analyze_button:
-                with st.spinner("Running red-flag analysis..."):
-                    analysis = analyze_document_chunked(
-                        [page.text for page in extraction.pages],
-                        model_id=model_id,
-                        on_progress=_on_analysis_progress,
-                    )
-                st.session_state["hoa_last_analysis_mode"] = "red"
-                st.session_state["hoa_analysis"] = analysis
-                st.session_state["hoa_last_analyzed_red_pages"] = analysis_page_range
-            else:
-                with st.spinner("Running green-flag analysis..."):
-                    analysis = analyze_document_chunked_green(
-                        [page.text for page in extraction.pages],
-                        model_id=model_id,
-                        on_progress=_on_analysis_progress,
-                    )
-                st.session_state["hoa_last_analysis_mode"] = "green"
-                st.session_state["hoa_green_analysis"] = analysis
-                st.session_state["hoa_last_analyzed_green_pages"] = analysis_page_range
-            analysis_status.success("Analysis complete.")
-            chunk_count = max(1, (len(extraction.pages) + 11) // 12)
-            input_tokens = analysis.input_tokens
-            output_tokens = analysis.output_tokens
-            if not input_tokens or not output_tokens:
-                input_tokens = max(1, len(context_text.split()) * chunk_count)
-                output_tokens = max(40, len(analysis.markdown.split()) * chunk_count)
-            _record_cost(
-                input_tokens,
-                output_tokens,
-                document_name=doc_name,
-            )
-            st.session_state["hoa_processing_analysis"] = False
-            st.rerun()
-
-        if use_saved_extraction_button and selected_extraction_key:
-            if not bucket_name:
-                st.error("Storage bucket is not configured. Set STORAGE_BUCKET_PREFIX and OwnerSub.")
-            else:
-                try:
-                    stored = _load_extraction_from_s3(
-                        bucket_name=bucket_name,
-                        key=selected_extraction_key,
-                    )
-                    if stored:
-                        st.session_state["hoa_extraction"] = stored
-                        st.session_state["hoa_documents"] = [
-                            {
-                                "name": stored.document_name,
-                                "size": 0,
-                            }
-                        ]
-                        st.session_state["hoa_extraction_s3_key"] = selected_extraction_key
-                        st.success(
-                            f"Loaded saved extraction: {stored.document_name} ({stored.page_count} pages)"
+                    with st.spinner("Running green-flag analysis..."):
+                        analysis = analyze_document_chunked_green(
+                            [page.text for page in extraction.pages],
+                            model_id=model_id,
+                            on_progress=_on_analysis_progress,
                         )
-                        st.rerun()
-                except Exception as exc:
-                    st.error(f"Failed to load saved extraction: {exc}")
-
-        retry_button = st.button(
-            "Retry Textract Polling",
-            key="hoa_textract_retry",
-            disabled=not st.session_state.get("hoa_textract_timeout"),
-        )
-
-        if retry_button:
-            job_id = st.session_state.get("hoa_textract_job_id")
-            s3_key = st.session_state.get("hoa_textract_s3_key")
-            bucket_name = st.session_state.get("hoa_textract_bucket")
-            if not job_id or not s3_key:
-                st.error("No Textract job to resume.")
-            else:
-                status_placeholder = st.empty()
-                progress_placeholder = st.empty()
-
-                def _on_progress(status: str, pages: int) -> None:
-                    st.session_state["hoa_textract_status"] = status
-                    st.session_state["hoa_textract_pages"] = pages
-                    status_placeholder.info(f"Textract status: {status}")
-                    progress_placeholder.caption(
-                        f"Pages detected so far: {pages}"
-                    )
-
-                try:
-                    with st.spinner("Resuming Textract polling..."):
-                        blocks = poll_textract_job(
-                            job_id,
-                            poll_delay_seconds=2.0,
-                            max_polls=120,
-                            on_progress=_on_progress,
-                        )
-                    if not st.session_state.get("hoa_retain_document"):
-                        cleanup_textract_job(s3_key, bucket_name=bucket_name)
-                        st.session_state["hoa_textract_s3_key"] = None
-                    st.session_state["hoa_textract_job_id"] = None
-                    st.session_state["hoa_textract_bucket"] = None
-                    st.session_state["hoa_textract_timeout"] = False
-
-                    extraction = blocks_to_extraction(blocks, upload.name)
-                    st.session_state["hoa_extraction"] = extraction
-                    if st.session_state.get("hoa_extraction_autosave", True):
-                        st.session_state["hoa_extraction_s3_key"] = _save_extraction_to_s3(
-                            bucket_name=bucket_name,
-                            extraction=extraction,
-                            source="textract_retry",
-                        )
-                    page_count = len(extraction.pages)
-                    st.success(f"Document type: PDF · Pages detected: {page_count}")
-                    context_text = build_page_context(extraction)
-                    doc_name = extraction.document_name
-                    doc_size = st.session_state.get("hoa_documents", [{}])[0].get("size", 0)
-                    if st.session_state.get("hoa_retain_document"):
-                        retention_hours = _retention_hours(
-                            st.session_state.get("hoa_retention_amount", 7),
-                            st.session_state.get("hoa_retention_unit", "days"),
-                        )
-                    else:
-                        retention_hours = S3_STAGING_HOURS
-                    storage_cost = _estimate_storage_cost(
-                        doc_size,
-                        retention_hours,
-                        st.session_state.get("hoa_storage_class", "Standard"),
-                    )
-                    request_cost = ((2 * S3_PUT_REQUEST_PER_1000) + (2 * S3_GET_REQUEST_PER_1000)) / 1000.0
-                    textract_cost = page_count * TEXTRACT_TEXT_DETECTION_PER_PAGE
-                    _set_cost_component(doc_name, "s3_storage", storage_cost)
-                    _set_cost_component(doc_name, "s3_requests", request_cost)
-                    _set_cost_component(doc_name, "textract", textract_cost)
-
-                    st.rerun()
-                except TimeoutError:
-                    st.session_state["hoa_textract_timeout"] = True
-                    st.warning(
-                        "Textract is still processing. Click 'Retry Textract Polling' to continue without re-uploading."
-                    )
-                except Exception as exc:
-                    st.error(f"Textract failed: {exc}")
-
+                    st.session_state["hoa_last_analysis_mode"] = "green"
+                    st.session_state["hoa_green_analysis"] = analysis
+                    st.session_state["hoa_last_analyzed_green_pages"] = analysis_page_range
+                analysis_status.success("Analysis complete.")
+                chunk_count = max(1, (len(extraction.pages) + 11) // 12)
+                input_tokens = analysis.input_tokens
+                output_tokens = analysis.output_tokens
+                if not input_tokens or not output_tokens:
+                    input_tokens = max(1, len(context_text.split()) * chunk_count)
+                    output_tokens = max(40, len(analysis.markdown.split()) * chunk_count)
+                _record_cost(
+                    input_tokens,
+                    output_tokens,
+                    document_name=doc_name,
+                )
+                st.session_state["hoa_processing_analysis"] = False
         analysis = st.session_state.get("hoa_analysis")
         green_analysis = st.session_state.get("hoa_green_analysis")
-        if analysis or green_analysis:
-            if analysis and green_analysis:
-                red_tab, green_tab = st.tabs(["Red Flags", "Green Flags"])
-                with red_tab:
+        with st.expander("Red/Green Flag Results", expanded=True):
+            if analysis or green_analysis:
+                if analysis and green_analysis:
+                    red_tab, green_tab = st.tabs(["Red Flags", "Green Flags"])
+                    with red_tab:
+                        _render_analysis_views(
+                            analysis=analysis,
+                            is_green=False,
+                            document_name=doc_name,
+                        )
+
+                    with green_tab:
+                        _render_analysis_views(
+                            analysis=green_analysis,
+                            is_green=True,
+                            document_name=doc_name,
+                        )
+                elif analysis:
                     _render_analysis_views(
                         analysis=analysis,
                         is_green=False,
                         document_name=doc_name,
                     )
-
-                with green_tab:
+                else:
                     _render_analysis_views(
                         analysis=green_analysis,
                         is_green=True,
                         document_name=doc_name,
                     )
-            elif analysis:
-                _render_analysis_views(
-                    analysis=analysis,
-                    is_green=False,
-                    document_name=doc_name,
-                )
             else:
-                _render_analysis_views(
-                    analysis=green_analysis,
-                    is_green=True,
-                    document_name=doc_name,
-                )
+                st.info("Run a red-flag or green-flag analysis to see results here.")
 
         if st.session_state.get("hoa_extraction"):
             extraction = st.session_state["hoa_extraction"]
             total_pages = len(extraction.pages)
             st.markdown("#### Follow-Up Questions")
-            range_start = st.session_state.get("hoa_page_start", 1)
-            range_end = st.session_state.get("hoa_page_end", total_pages)
-            question = st.chat_input(
-                "Ask a follow-up question (e.g., 'Are rentals allowed?')",
-                key="hoa_question",
-            )
-            if question:
-                if range_start > range_end:
-                    st.error("Adjust the page range to submit a question.")
+            st.caption("Follow-up answers are limited to the extracted text in the selected page range.")
+
+            default_start = st.session_state.get("hoa_page_start", 1)
+            default_end = st.session_state.get("hoa_page_end", total_pages)
+
+            with st.form("hoa_followup_form", clear_on_submit=True):
+                question = st.text_input(
+                    "Question",
+                    placeholder="e.g., Are rentals allowed?",
+                )
+                answer_type = st.selectbox(
+                    "Answer type",
+                    options=["Summarized", "Yes/No + cite", "Clause lookup"],
+                    index=0,
+                    help="Used to shape the response; citations are always included when found.",
+                )
+                range_col1, range_col2 = st.columns(2)
+                with range_col1:
+                    followup_start = st.number_input(
+                        "Start page (optional)",
+                        min_value=1,
+                        max_value=max(1, total_pages),
+                        value=default_start,
+                        step=1,
+                    )
+                with range_col2:
+                    followup_end = st.number_input(
+                        "End page (optional)",
+                        min_value=1,
+                        max_value=max(1, total_pages),
+                        value=default_end,
+                        step=1,
+                    )
+                submit_followup = st.form_submit_button(
+                    "Ask question",
+                    disabled=is_processing_followup,
+                )
+
+            if submit_followup:
+                st.session_state["hoa_processing_followup"] = True
+                if not question.strip():
+                    st.warning("Please enter a follow-up question.")
+                    st.session_state["hoa_processing_followup"] = False
                     return
+                if followup_start > followup_end:
+                    st.error("Start page cannot be greater than end page.")
+                    st.session_state["hoa_processing_followup"] = False
+                    return
+
                 filtered_pages = [
                     page
                     for page in extraction.pages
-                    if range_start <= page.page_number <= range_end
+                    if followup_start <= page.page_number <= followup_end
                 ]
+                if not filtered_pages:
+                    st.error("No extracted pages found in that range.")
+                    st.session_state["hoa_processing_followup"] = False
+                    return
+
                 context_text = build_page_context(
-                    type(extraction)(
+                    DocumentExtraction(
                         document_name=extraction.document_name,
                         pages=filtered_pages,
                     )
                 )
                 model_id = st.session_state.get("hoa_inference_profile")
-                response = answer_question(
-                    context_text,
-                    question,
+                shaped_question = f"Answer type: {answer_type}. {question.strip()}"
+                followup_status = st.empty()
+
+                def _on_followup_progress(current: int, total: int) -> None:
+                    followup_status.info(
+                        f"Searching extracted text... (chunk {current} of {total})"
+                    )
+
+                response = answer_question_chunked(
+                    [(page.page_number, page.text) for page in filtered_pages],
+                    shaped_question,
                     document_name=extraction.document_name,
                     model_id=model_id,
+                    on_progress=_on_followup_progress,
                 )
+                followup_status.success("Follow-up answer ready.")
                 input_tokens = response.get("input_tokens")
                 output_tokens = response.get("output_tokens")
                 if not input_tokens or not output_tokens:
-                    input_tokens = max(1, len(question.split()))
+                    input_tokens = max(1, len(shaped_question.split()))
                     output_tokens = max(20, len(str(response).split()))
                 _record_cost(
                     int(input_tokens),
@@ -1340,23 +1387,33 @@ def render_document_vetting() -> None:
                 )
 
                 query = VettingQuery(
-                    question=question,
+                    question=question.strip(),
                     answer=response.get("answer", ""),
                     document_name=extraction.document_name,
                     page_numbers=response.get("page_numbers", []),
                     quoted_text=response.get("quoted_text", ""),
+                    confidence=response.get("confidence", "low"),
+                    not_found=bool(response.get("not_found")),
+                    answer_type=answer_type,
+                    page_range=(int(followup_start), int(followup_end)),
                 )
                 st.session_state["hoa_queries"].append(query)
+                st.session_state["hoa_processing_followup"] = False
 
         if st.session_state.get("hoa_queries"):
             st.markdown("#### Query History")
             for idx, query in enumerate(reversed(st.session_state["hoa_queries"]), start=1):
                 with st.expander(f"Question {idx}: {query.question}", expanded=False):
                     pages = ", ".join(str(p) for p in query.page_numbers) or "—"
+                    page_range = query.page_range or ("—", "—")
+                    not_found_label = "Yes" if query.not_found else "No"
                     st.markdown(
-                        f"**Answer:** {query.answer}\n\n"
+                        f"**Answer type:** {query.answer_type}\n\n"
+                        f"**Answer:**\n{query.answer}\n\n"
                         f"**Document:** {query.document_name}\n\n"
-                        f"**Pages:** {pages}\n\n"
+                        f"**Page range used:** {page_range[0]}–{page_range[1]}\n\n"
+                        f"**Pages cited:** {pages}\n\n"
+                        f"**Confidence:** {query.confidence.title()} · **Not found:** {not_found_label}\n\n"
                         f"**Quoted text:** _{query.quoted_text or '—'}_"
                     )
 

@@ -128,6 +128,55 @@ def poll_textract_job(
     return blocks
 
 
+def get_textract_job_status(
+    job_id: str,
+    *,
+    region_name: str | None = None,
+) -> str:
+    client = boto3.client("textract", region_name=region_name)
+    result = client.get_document_text_detection(JobId=job_id)
+    return result.get("JobStatus", "UNKNOWN")
+
+
+def fetch_textract_results(
+    job_id: str,
+    *,
+    region_name: str | None = None,
+    on_progress: Optional[ProgressCallback] = None,
+) -> List[Dict]:
+    client = boto3.client("textract", region_name=region_name)
+    blocks: List[Dict] = []
+    next_token = None
+    last_pages = 0
+    while True:
+        if next_token:
+            result = client.get_document_text_detection(
+                JobId=job_id,
+                NextToken=next_token,
+            )
+        else:
+            result = client.get_document_text_detection(JobId=job_id)
+        blocks.extend(result.get("Blocks", []))
+        next_token = result.get("NextToken")
+        if on_progress:
+            pages_found = _estimate_pages(blocks)
+            if pages_found != last_pages:
+                last_pages = pages_found
+            on_progress("SUCCEEDED", last_pages)
+        if not next_token:
+            break
+    return blocks
+
+
+def cancel_textract_job(
+    job_id: str,
+    *,
+    region_name: str | None = None,
+) -> None:
+    client = boto3.client("textract", region_name=region_name)
+    client.stop_document_text_detection(JobId=job_id)
+
+
 def cleanup_textract_job(
     s3_key: str,
     *,
