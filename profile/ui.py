@@ -11,7 +11,7 @@ from .identity import (
     profile_key,
 )
 from .state_io import apply_profile, extract_profile
-from .storage import list_profiles, load_profile, save_profile
+from .storage import delete_profile, list_profiles, load_profile, save_profile
 
 
 def render_profile_manager() -> None:
@@ -51,7 +51,7 @@ def render_profile_manager() -> None:
             )
             selected_slug = None
 
-        save_cols = st.columns([1, 1])
+        save_cols = st.columns([1, 1, 1])
         if save_cols[0].button("Save Profile", width='stretch'):
             save_path = save_current_profile()
             st.success(f"Saved to {save_path}")
@@ -65,6 +65,38 @@ def render_profile_manager() -> None:
             else:
                 apply_profile(profile)
                 st.success("Profile loaded. Scroll to see updates.")
+                st.rerun()
+
+        delete_disabled = selected_slug is None
+        confirm_key = "profile_delete_confirm"
+        if confirm_key not in st.session_state:
+            st.session_state[confirm_key] = False
+
+        if not st.session_state[confirm_key]:
+            if save_cols[2].button(
+                "Delete",
+                width='stretch',
+                disabled=delete_disabled,
+                type="secondary",
+            ):
+                st.session_state[confirm_key] = True
+                st.rerun()
+        else:
+            if save_cols[2].button(
+                "Confirm",
+                width='stretch',
+                disabled=delete_disabled,
+                type="primary",
+            ):
+                if selected_slug == house_slug:
+                    st.warning("You cannot delete the active profile. Load another profile first.")
+                else:
+                    deleted = delete_profile(owner_sub, selected_slug)
+                    if deleted:
+                        st.success("Profile deleted.")
+                    else:
+                        st.error("Profile not found.")
+                st.session_state[confirm_key] = False
                 st.rerun()
 
     # Render consolidated AI usage costs below profile manager

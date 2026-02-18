@@ -35,6 +35,14 @@ def load_profile(owner_sub: str, house_slug: str) -> Dict[str, Any] | None:
         return json.load(handle)
 
 
+def delete_profile(owner_sub: str, house_slug: str) -> bool:
+    path = _owner_dir(owner_sub) / f"{house_slug}.json"
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
 def list_profiles(owner_sub: str) -> List[str]:
     if not BASE_DIR.exists():
         return []

@@ -64,6 +64,14 @@ def render_mortgage():
 - As **%**: Percentage of the home price (e.g., 20% of $400,000 = $80,000)
 - As **$**: Fixed dollar amount
 
+**Closing Costs** – Buyer-side costs due at closing (title/escrow, lender fees, etc.):
+- As **%**: Percentage of the home price
+- As **$**: Fixed dollar amount
+
+**Earnest Money** – Deposit paid when the offer is accepted (credited at closing):
+- As **%**: Percentage of the home price
+- As **$**: Fixed dollar amount
+
 The **Loan Amount** = Home Price − Down Payment. A larger down payment reduces your loan amount and may help you avoid PMI (Private Mortgage Insurance).
 """)
 
@@ -99,6 +107,57 @@ The **Loan Amount** = Home Price − Down Payment. A larger down payment reduces
 
             dp_is_percent = (down_payment_is_percent == "%")
 
+            st.caption("Closing Costs")
+
+            cc_cols = st.columns([0.75, 0.25], gap="small")
+            with cc_cols[0]:
+                closing_costs_value = st.number_input(
+                    "Closing Costs",
+                    min_value=0.0,
+                    value=float(mortgage_inputs.get("closing_costs_value", 0.0)),
+                    step=500.0,
+                    label_visibility="collapsed"
+                )
+            with cc_cols[1]:
+                closing_costs_is_percent_default = mortgage_inputs.get(
+                    "closing_costs_is_percent", False
+                )
+                closing_costs_is_percent = st.selectbox(
+                    "Unit",
+                    ["%", "$"],
+                    index=0 if closing_costs_is_percent_default else 1,
+                    key="closing_costs_unit",
+                    label_visibility="collapsed"
+                )
+
+            cc_is_percent = (closing_costs_is_percent == "%")
+
+            st.caption("Earnest Money")
+            st.caption("ℹ️ Earnest money is credited toward your down payment at closing.")
+
+            em_cols = st.columns([0.75, 0.25], gap="small")
+            with em_cols[0]:
+                earnest_money_value = st.number_input(
+                    "Earnest Money",
+                    min_value=0.0,
+                    value=float(mortgage_inputs.get("earnest_money_value", 0.0)),
+                    step=500.0,
+                    label_visibility="collapsed"
+                )
+            with em_cols[1]:
+                earnest_money_is_percent_default = mortgage_inputs.get(
+                    "earnest_money_is_percent", False
+                )
+                earnest_money_is_percent = st.selectbox(
+                    "Unit",
+                    ["%", "$"],
+                    index=0 if earnest_money_is_percent_default else 1,
+                    key="earnest_money_unit",
+                    label_visibility="collapsed"
+                )
+
+            em_is_percent = (earnest_money_is_percent == "%")
+
             # ---- House Purchase Essentials Validation Status ----
             purchase_errors = []
             if dp_is_percent:
@@ -109,6 +168,24 @@ The **Loan Amount** = Home Price − Down Payment. A larger down payment reduces
             else:
                 if down_payment_value < 0:
                     purchase_errors.append("Down payment amount cannot be negative.")
+
+            if cc_is_percent:
+                if closing_costs_value < 0:
+                    purchase_errors.append("Closing costs percentage cannot be negative.")
+                elif closing_costs_value > 100:
+                    purchase_errors.append("Closing costs percentage cannot exceed 100%.")
+            else:
+                if closing_costs_value < 0:
+                    purchase_errors.append("Closing costs amount cannot be negative.")
+
+            if em_is_percent:
+                if earnest_money_value < 0:
+                    purchase_errors.append("Earnest money percentage cannot be negative.")
+                elif earnest_money_value > 100:
+                    purchase_errors.append("Earnest money percentage cannot exceed 100%.")
+            else:
+                if earnest_money_value < 0:
+                    purchase_errors.append("Earnest money amount cannot be negative.")
             
             if purchase_errors:
                 st.error("\n".join([f"• {err}" for err in purchase_errors]))
@@ -699,6 +776,10 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
                 "home_price": home_price,
                 "down_payment_value": down_payment_value,
                 "down_payment_is_percent": dp_is_percent,
+                "closing_costs_value": closing_costs_value,
+                "closing_costs_is_percent": cc_is_percent,
+                "earnest_money_value": earnest_money_value,
+                "earnest_money_is_percent": em_is_percent,
                 "loan_term_years": int(loan_term_years),
                 "annual_rate": annual_rate,
                 "start_month": int(start_month),
@@ -776,6 +857,10 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
                     home_price=home_price,
                     down_payment_value=down_payment_value,
                     down_payment_is_percent=dp_is_percent,
+                    closing_costs_value=closing_costs_value,
+                    closing_costs_is_percent=cc_is_percent,
+                    earnest_money_value=earnest_money_value,
+                    earnest_money_is_percent=em_is_percent,
                     loan_term_years=int(loan_term_years),
                     annual_interest_rate_pct=annual_rate,
                     start_month=int(start_month),
@@ -830,6 +915,10 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
             home_price=home_price,
             down_payment_value=down_payment_value,
             down_payment_is_percent=dp_is_percent,
+            closing_costs_value=closing_costs_value,
+            closing_costs_is_percent=cc_is_percent,
+            earnest_money_value=earnest_money_value,
+            earnest_money_is_percent=em_is_percent,
             loan_term_years=int(loan_term_years),
             annual_interest_rate_pct=annual_rate,
             start_month=int(start_month),

@@ -5,6 +5,10 @@ class MortgageInputs:
     home_price: float
     down_payment_value: float
     down_payment_is_percent: bool
+    closing_costs_value: float
+    closing_costs_is_percent: bool
+    earnest_money_value: float
+    earnest_money_is_percent: bool
     loan_term_years: int
     annual_interest_rate_pct: float
     start_month: int
