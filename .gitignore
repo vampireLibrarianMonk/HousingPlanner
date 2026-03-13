@@ -17,6 +17,9 @@ cdk.out
 # Local profile data
 data/
 
+# Per-profile runtime caches
+.cache/
+
 # Deprecated directories - files now stored in /tmp
 app/
 coverage_test_extracted/

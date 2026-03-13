@@ -37,7 +37,9 @@ def compute_commute(
 
     seg_rows = []
     total_m = 0.0
-    total_s = 0.0
+    total_drive_s = 0.0
+    total_loiter_s = 0.0
+    total_trip_s = 0.0
 
     all_route_points = []
     segment_routes = []
@@ -67,17 +69,22 @@ def compute_commute(
     points = [home] + ordered_locs + revisit_locs + [home]
     return_start_index = len(ordered_locs)
 
-    # Initialize clock (Google requires >= now)
-    now = datetime.now(tz=timezone.utc)
-    candidate_dt = now.replace(
+    # Initialize route clock using local timezone intent from UI time picker.
+    # Keep table schedule anchored to the selected local clock time.
+    now_local = datetime.now().astimezone()
+    candidate_dt = now_local.replace(
         hour=departure_time.hour,
         minute=departure_time.minute,
         second=0,
         microsecond=0,
     )
 
-    if candidate_dt <= now:
-        candidate_dt = now + timedelta(minutes=1)
+    # Some providers require departure >= now. Clamp API departure without
+    # mutating the displayed table schedule times.
+    min_api_departure_dt = now_local + timedelta(minutes=1)
+
+    def _effective_api_departure(dt: datetime) -> datetime:
+        return dt if dt >= min_api_departure_dt else min_api_departure_dt
 
     current_dt = candidate_dt
 
@@ -98,7 +105,7 @@ def compute_commute(
                 api_key=google_api_key,
                 start=a,
                 end=b,
-                departure_dt=current_dt,
+                departure_dt=_effective_api_departure(current_dt),
             )
             pts = decode_geometry(geom, "GOOGLE")
             provider = "Google"
@@ -116,7 +123,7 @@ def compute_commute(
                         api_key=waze_api_key,
                         start=a,
                         end=b,
-                        departure_timestamp=int(current_dt.timestamp()),
+                        departure_timestamp=int(_effective_api_departure(current_dt).astimezone(timezone.utc).timestamp()),
                         arrival_timestamp=None,
                     )
                     last_exc = None
@@ -168,6 +175,9 @@ def compute_commute(
 
         arrive_dt = current_dt + timedelta(seconds=dur_s)
 
+        # Apply loiter on every arrival to an included stop label.
+        # This supports revisits (e.g., Daycare stop time on both directions).
+        # Home is not part of stops_df, so return-to-home loiter remains zero.
         loiter_min = 0
         match = stops_df[stops_df["Label"] == b["label"]]
         if not match.empty:
@@ -176,7 +186,9 @@ def compute_commute(
         leave_dt = arrive_dt + timedelta(minutes=loiter_min)
 
         total_m += dist_m
-        total_s += dur_s + (loiter_min * 60)
+        total_drive_s += dur_s
+        total_loiter_s += loiter_min * 60
+        total_trip_s = total_drive_s + total_loiter_s
 
         seg_rows.append({
             "From": a["label"],
@@ -187,7 +199,9 @@ def compute_commute(
             "Distance (mi)": round(dist_m / 1609.344, 2),
             "Loiter (min)": loiter_min,
             "Leave": leave_dt.strftime("%H:%M"),
-            "Cumulative (min)": round(total_s / 60.0, 1),
+            "Cumulative Drive (min)": round(total_drive_s / 60.0, 1),
+            "Cumulative Loiter (min)": round(total_loiter_s / 60.0, 1),
+            "Cumulative (min)": round(total_trip_s / 60.0, 1),
         })
 
         current_dt = leave_dt
@@ -195,7 +209,10 @@ def compute_commute(
     return {
         "segments": seg_rows,
         "total_m": total_m,
-        "total_s": total_s,
+        "total_drive_s": total_drive_s,
+        "total_loiter_s": total_loiter_s,
+        "total_trip_s": total_trip_s,
+        "total_s": total_trip_s,
         "segment_routes": segment_routes,
         "route_points": all_route_points,
     }
