@@ -1,13 +1,23 @@
 import streamlit as st
 import pandas as pd
+from typing import Any
+import tempfile
+import os
+import json
+import hashlib
+from pathlib import Path
+
+from fpdf import FPDF
 
 from .models import MortgageInputs
 from .calculations import (
     monthly_pi_payment,
     amortization_totals,
+    amortization_totals_with_adjustments,
     amortization_schedule,
-    amortization_schedule_with_extra,
+    amortization_schedule_with_adjustments,
     payoff_date,
+    payoff_date_from_months,
 )
 
 from .costs import compute_costs_monthly
@@ -31,6 +41,296 @@ def _validate_table_rows(rows: pd.DataFrame, required_columns: list[str], table_
             if amount is None or amount < 0:
                 errors.append(f"{table_label} row {row_num}: 'Amount' must be >= 0.")
     return errors
+
+
+def _fmt_currency(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def _pdf_text(value: Any) -> str:
+    return str(value).encode("latin-1", "replace").decode("latin-1")
+
+
+def _monthly_total_from_log(
+        rows: list[dict[str, Any]],
+        amount_key: str = "Amount",
+        cadence_key: str = "Cadence",
+) -> float:
+    total = 0.0
+    for row in rows:
+        amount = float(row.get(amount_key, 0.0) or 0.0)
+        cadence = row.get(cadence_key, "$/month")
+        if cadence == "$/year":
+            total += amount / 12.0
+        else:
+            total += amount
+    return total
+
+
+def _build_mortgage_assumptions_pdf(report: dict[str, Any]) -> bytes:
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "Mortgage & Loan Assumptions Plan", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 7, "Generated from current Mortgage section inputs", ln=True)
+    pdf.ln(2)
+
+    def add_section(title: str, rows: list[tuple[str, str]]) -> None:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, _pdf_text(title), ln=True)
+        pdf.set_font("Helvetica", "", 10)
+        for label, value in rows:
+            pdf.multi_cell(0, 6, _pdf_text(f"- {label}: {value}"))
+        pdf.ln(1)
+
+    add_section("1) House Purchase Essentials", report["house_purchase"])
+    add_section("2) Loan Terms", report["loan_terms"])
+    add_section("3) Annual Tax & Cost", report["tax_cost"])
+    add_section("4) Household Expenses", report["household"])
+    add_section("5) Vehicle Expenses", report["vehicle"])
+    add_section("6) Kids College Savings", report["college"])
+
+    add_section("7) Additional Expenses", report["custom_expenses"])
+    if report["custom_expense_rows"]:
+        pdf.set_font("Helvetica", "", 10)
+        for row in report["custom_expense_rows"]:
+            pdf.multi_cell(
+                0,
+                6,
+                _pdf_text(
+                    f"  - {row.get('Label', '')}: {_fmt_currency(float(row.get('Amount', 0.0) or 0.0))} ({row.get('Cadence', '$/month')})"
+                ),
+            )
+        pdf.ln(1)
+
+    add_section("8) Take Home Pay", report["take_home"])
+    if report["take_home_rows"]:
+        pdf.set_font("Helvetica", "", 10)
+        for row in report["take_home_rows"]:
+            pdf.multi_cell(
+                0,
+                6,
+                _pdf_text(
+                    f"  - {row.get('Source', '')}: {_fmt_currency(float(row.get('Amount', 0.0) or 0.0))} ({row.get('Cadence', '$/month')})"
+                ),
+            )
+        pdf.ln(1)
+
+    add_section("9) Extra Principal Payments", report["extra_principal"])
+    if report["lump_sum_rows"]:
+        pdf.set_font("Helvetica", "", 10)
+        for row in report["lump_sum_rows"]:
+            pdf.multi_cell(
+                0,
+                6,
+                _pdf_text(
+                    f"  - Year {int(row.get('Year', 1))}: {_fmt_currency(float(row.get('Amount', 0.0) or 0.0))}"
+                ),
+            )
+        pdf.ln(1)
+
+    chart_payload = report.get("chart_payload")
+    chart_path = report.get("chart_image_path")
+    generated_temp_chart = False
+    if chart_path and not os.path.exists(str(chart_path)):
+        chart_path = None
+    if chart_payload and not chart_path:
+        try:
+            chart_path = _build_amortization_chart_image(chart_payload)
+            generated_temp_chart = bool(chart_path)
+            if chart_path:
+                pdf.set_font("Helvetica", "B", 11)
+                pdf.cell(0, 8, _pdf_text("Amortization Graphic"), ln=True)
+                pdf.image(chart_path, w=185)
+                pdf.ln(2)
+        except Exception:
+            # Keep PDF generation resilient if chart rendering fails.
+            pass
+        finally:
+            if generated_temp_chart and chart_path and os.path.exists(chart_path):
+                os.remove(chart_path)
+    elif chart_path:
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 8, _pdf_text("Amortization Graphic"), ln=True)
+        pdf.image(str(chart_path), w=185)
+        pdf.ln(2)
+
+    add_section("10) Summary & Decision Metrics", report["summary"])
+
+    output = pdf.output(dest="S")
+    if isinstance(output, (bytes, bytearray)):
+        return bytes(output)
+    return output.encode("latin-1")
+
+
+def _build_amortization_chart_image(chart_payload: dict[str, Any]) -> str | None:
+    return _build_amortization_chart_image_to_path(chart_payload, output_path=None)
+
+
+def _compute_amortization_from_payload(chart_payload: dict[str, Any]) -> dict[str, Any]:
+    loan_amount = float(chart_payload.get("loan_amount", 0.0) or 0.0)
+    annual_rate = float(chart_payload.get("annual_rate", 0.0) or 0.0)
+    loan_term_years = int(chart_payload.get("loan_term_years", 30) or 30)
+    pi = float(chart_payload.get("pi", 0.0) or 0.0)
+
+    recurring_extra_amount = float(chart_payload.get("recurring_extra_amount", 0.0) or 0.0)
+    recurring_frequency_months = int(chart_payload.get("recurring_frequency_months", 1) or 1)
+    recurring_start_month = int(chart_payload.get("recurring_start_month", 1) or 1)
+    recurring_end_month = int(chart_payload.get("recurring_end_month", loan_term_years * 12) or (loan_term_years * 12))
+    start_year = int(chart_payload.get("start_year", 2026) or 2026)
+    start_month = int(chart_payload.get("start_month", 1) or 1)
+
+    lump_sum_rows = list(chart_payload.get("lump_sum_rows", []))
+    lump_sum_by_month = {}
+    for row in lump_sum_rows:
+        year_num = max(1, min(loan_term_years, int(row.get("Year", 1))))
+        amount = max(0.0, float(row.get("Amount", 0.0) or 0.0))
+        month_index = (year_num - 1) * 12 + 1
+        lump_sum_by_month[month_index] = lump_sum_by_month.get(month_index, 0.0) + amount
+
+    has_recurring = recurring_extra_amount > 0
+    has_lumps = any(float(row.get("Amount", 0.0) or 0.0) > 0 for row in lump_sum_rows)
+
+    if has_recurring or has_lumps:
+        dynamic_total_interest, dynamic_total_pi_paid, dynamic_months_to_payoff = amortization_totals_with_adjustments(
+            loan_amount,
+            annual_rate,
+            loan_term_years,
+            pi,
+            recurring_extra_amount=recurring_extra_amount,
+            recurring_frequency_months=recurring_frequency_months,
+            recurring_start_month=recurring_start_month,
+            recurring_end_month=recurring_end_month,
+            lump_sum_by_month=lump_sum_by_month,
+        )
+        dynamic_payoff = payoff_date_from_months(
+            start_year,
+            start_month,
+            dynamic_months_to_payoff,
+        )
+        amortization_df = amortization_schedule_with_adjustments(
+            loan_amount,
+            annual_rate,
+            loan_term_years,
+            pi,
+            recurring_extra_amount=recurring_extra_amount,
+            recurring_frequency_months=recurring_frequency_months,
+            recurring_start_month=recurring_start_month,
+            recurring_end_month=recurring_end_month,
+            lump_sum_by_month=lump_sum_by_month,
+        )
+    else:
+        dynamic_total_interest, dynamic_total_pi_paid = amortization_totals(
+            loan_amount,
+            annual_rate,
+            loan_term_years,
+            pi,
+        )
+        dynamic_payoff = payoff_date(start_year, start_month, loan_term_years)
+        amortization_df = amortization_schedule(
+            loan_amount,
+            annual_rate,
+            loan_term_years,
+            pi,
+        )
+
+    return {
+        "loan_amount": loan_amount,
+        "annual_rate": annual_rate,
+        "loan_term_years": loan_term_years,
+        "pi": pi,
+        "dynamic_total_interest": dynamic_total_interest,
+        "dynamic_total_pi_paid": dynamic_total_pi_paid,
+        "dynamic_payoff": dynamic_payoff,
+        "amortization_df": amortization_df,
+        "has_recurring": has_recurring,
+        "has_lumps": has_lumps,
+    }
+
+
+def _build_amortization_chart_image_to_path(chart_payload: dict[str, Any], output_path: str | None = None) -> str | None:
+    amortization_info = _compute_amortization_from_payload(chart_payload)
+    amortization_df = amortization_info["amortization_df"]
+    dynamic_total_interest = float(amortization_info["dynamic_total_interest"])
+    dynamic_total_pi_paid = float(amortization_info["dynamic_total_pi_paid"])
+    dynamic_payoff = str(amortization_info["dynamic_payoff"])
+
+    years = amortization_df.index + 1
+    interest_cumulative = amortization_df["Interest"].cumsum()
+    balance = amortization_df["Ending Balance"]
+    annual_payment = amortization_df["Interest"] + amortization_df["Principal"]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(years, balance, label="Remaining Balance", linewidth=2)
+    ax.plot(years, interest_cumulative, label="Cumulative Interest", linewidth=2)
+    ax.plot(years, annual_payment, label="Annual Payment", linewidth=2, linestyle="--")
+
+    ax.set_title("Mortgage Amortization Over Time")
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Dollars")
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.legend()
+
+    chart_summary_text = (
+        f"Total of Mortgage Payments (P&I): { _fmt_currency(dynamic_total_pi_paid)}\n"
+        f"Total Interest: { _fmt_currency(dynamic_total_interest)}\n"
+        f"Mortgage Payoff Date: {dynamic_payoff}"
+    )
+    ax.text(
+        0.98,
+        0.98,
+        chart_summary_text,
+        transform=ax.transAxes,
+        fontsize=9.5,
+        va="top",
+        ha="right",
+        bbox={
+            "boxstyle": "round,pad=0.4",
+            "facecolor": "white",
+            "edgecolor": "#9e9e9e",
+            "alpha": 0.9,
+        },
+    )
+
+    if output_path:
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(output), format="png", dpi=150, bbox_inches="tight")
+        tmp_path = str(output)
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            fig.savefig(tmp.name, format="png", dpi=150, bbox_inches="tight")
+            tmp_path = tmp.name
+
+    plt.close(fig)
+    return tmp_path
+
+
+def _amortization_cache_image_path(chart_payload: dict[str, Any]) -> Path:
+    base_dir = Path("data/cache/amortization")
+
+    owner_sub = str(st.session_state.get("profile_owner_sub", "local"))
+    house_slug = str(st.session_state.get("profile_house_slug", "unscoped-house"))
+
+    payload_str = json.dumps(chart_payload, sort_keys=True, default=str)
+    digest = hashlib.sha1(payload_str.encode("utf-8")).hexdigest()[:12]
+
+    file_name = f"amortization_{owner_sub}_{house_slug}_{digest}.png"
+    safe_name = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in file_name)
+    return base_dir / safe_name
+
+
+def _ensure_amortization_chart_cached(chart_payload: dict[str, Any]) -> str | None:
+    target = _amortization_cache_image_path(chart_payload)
+    if not target.exists():
+        try:
+            _build_amortization_chart_image_to_path(chart_payload, output_path=str(target))
+        except Exception:
+            return None
+    return str(target)
 
 
 def render_mortgage():
@@ -896,6 +1196,256 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
                 except Exception as exc:
                     st.error(f"Save failed: {exc}")
 
+            if st.button("Generate PDF", key="generate_mortgage_pdf"):
+                try:
+                    down_payment_amt_pdf = (
+                        home_price * (down_payment_value / 100.0)
+                        if dp_is_percent
+                        else down_payment_value
+                    )
+                    loan_amount_pdf = max(home_price - down_payment_amt_pdf, 0.0)
+
+                    inputs_pdf = MortgageInputs(
+                        home_price=home_price,
+                        down_payment_value=down_payment_value,
+                        down_payment_is_percent=dp_is_percent,
+                        closing_costs_value=closing_costs_value,
+                        closing_costs_is_percent=cc_is_percent,
+                        earnest_money_value=earnest_money_value,
+                        earnest_money_is_percent=em_is_percent,
+                        loan_term_years=int(loan_term_years),
+                        annual_interest_rate_pct=annual_rate,
+                        start_month=int(start_month),
+                        start_year=int(start_year),
+                        include_costs=include_costs,
+                        property_tax_value=property_tax_value,
+                        property_tax_is_percent=property_tax_is_percent,
+                        home_insurance_annual=home_insurance_annual,
+                        pmi_monthly=pmi_monthly,
+                        hoa_monthly=hoa_monthly,
+                        other_yearly=other_yearly,
+                    )
+                    costs_pdf = compute_costs_monthly(inputs_pdf)
+                    pi_pdf = monthly_pi_payment(
+                        loan_amount_pdf,
+                        annual_rate,
+                        int(loan_term_years),
+                    )
+                    payoff_pdf = payoff_date(
+                        int(start_year),
+                        int(start_month),
+                        int(loan_term_years),
+                    )
+                    monthly_interest_payment_pdf = (
+                        loan_amount_pdf * ((annual_rate / 100.0) / 12.0)
+                        if loan_amount_pdf > 0 and annual_rate > 0
+                        else 0.0
+                    )
+
+                    custom_rows = list(st.session_state.get("custom_expenses_log", []))
+                    take_home_rows = list(st.session_state.get("take_home_log", []))
+                    lump_sum_rows = list(st.session_state.get("lump_sum_payments", []))
+
+                    custom_monthly_pdf = (
+                        _monthly_total_from_log(custom_rows)
+                        if include_custom_expenses
+                        else 0.0
+                    )
+                    take_home_monthly_pdf = (
+                        _monthly_total_from_log(take_home_rows)
+                        if include_take_home
+                        else 0.0
+                    )
+
+                    monthly_tax_pdf = costs_pdf["property_tax_monthly"] if include_costs else 0.0
+                    monthly_ins_pdf = costs_pdf["home_insurance_monthly"] if include_costs else 0.0
+                    monthly_hoa_pdf = costs_pdf["hoa_monthly"] if include_costs else 0.0
+                    monthly_pmi_pdf = costs_pdf["pmi_monthly"] if include_costs else 0.0
+                    monthly_other_pdf = costs_pdf["other_home_monthly"] if include_costs else 0.0
+
+                    monthly_total_pdf = (
+                            pi_pdf
+                            + monthly_tax_pdf
+                            + monthly_ins_pdf
+                            + monthly_hoa_pdf
+                            + monthly_pmi_pdf
+                            + monthly_other_pdf
+                            + household_monthly
+                            + vehicle_monthly
+                            + college_monthly
+                            + custom_monthly_pdf
+                    )
+
+                    is_affordable_pdf = (
+                            include_take_home
+                            and monthly_total_pdf <= take_home_monthly_pdf
+                    )
+                    leftover_monthly_pdf = (
+                        take_home_monthly_pdf - monthly_total_pdf
+                        if include_take_home
+                        else None
+                    )
+
+                    chart_payload_pdf = {
+                        "loan_amount": loan_amount_pdf,
+                        "annual_rate": annual_rate,
+                        "loan_term_years": int(loan_term_years),
+                        "pi": pi_pdf,
+                        "recurring_extra_amount": float(st.session_state.get("scheduled_extra_amount", 0.0) or 0.0),
+                        "recurring_frequency_months": {
+                            "Monthly": 1,
+                            "Quarterly": 3,
+                            "Semi-Annual": 6,
+                            "Annual": 12,
+                        }.get(str(st.session_state.get("scheduled_extra_frequency", "Monthly")), 1),
+                        "recurring_start_month": (
+                            (int(st.session_state.get("scheduled_extra_start_year", 1) or 1) - 1) * 12
+                        ) + 1,
+                        "recurring_end_month": int(st.session_state.get("scheduled_extra_end_year", int(loan_term_years)) or int(loan_term_years)) * 12,
+                        "lump_sum_rows": lump_sum_rows,
+                        "start_year": int(start_year),
+                        "start_month": int(start_month),
+                    }
+
+                    # Keep PDF summary metrics aligned with on-screen amortization details.
+                    try:
+                        amortization_info_pdf = _compute_amortization_from_payload(chart_payload_pdf)
+                        summary_total_pi_paid_pdf = float(amortization_info_pdf["dynamic_total_pi_paid"])
+                        summary_total_interest_pdf = float(amortization_info_pdf["dynamic_total_interest"])
+                        summary_payoff_pdf = str(amortization_info_pdf["dynamic_payoff"])
+                    except Exception:
+                        summary_total_interest_pdf, summary_total_pi_paid_pdf = amortization_totals(
+                            loan_amount_pdf,
+                            annual_rate,
+                            int(loan_term_years),
+                            pi_pdf,
+                        )
+                        summary_payoff_pdf = payoff_pdf
+
+                    report = {
+                        "house_purchase": [
+                            ("Home Price", _fmt_currency(home_price)),
+                            (
+                                "Down Payment",
+                                f"{down_payment_value:.2f}%" if dp_is_percent else _fmt_currency(down_payment_value),
+                            ),
+                            (
+                                "Closing Costs",
+                                f"{closing_costs_value:.2f}%" if cc_is_percent else _fmt_currency(closing_costs_value),
+                            ),
+                            (
+                                "Earnest Money",
+                                f"{earnest_money_value:.2f}%" if em_is_percent else _fmt_currency(earnest_money_value),
+                            ),
+                            ("Down Payment Amount", _fmt_currency(down_payment_amt_pdf)),
+                            ("Loan Amount", _fmt_currency(loan_amount_pdf)),
+                        ],
+                        "loan_terms": [
+                            ("Loan Term", f"{int(loan_term_years)} years"),
+                            ("Interest Rate", f"{annual_rate:.2f}%"),
+                            ("Start Date", f"{start_month_name} {int(start_year)}"),
+                            ("Monthly Principal & Interest", _fmt_currency(pi_pdf)),
+                            ("Estimated Payoff Date", payoff_pdf),
+                        ],
+                        "tax_cost": [
+                            ("Include Taxes & Costs", "Yes" if include_costs else "No"),
+                            (
+                                "Property Tax",
+                                f"{property_tax_value:.2f}%" if property_tax_is_percent else f"{_fmt_currency(property_tax_value)} / year",
+                            ),
+                            ("Home Insurance", f"{_fmt_currency(home_insurance_annual)} / year"),
+                            ("PMI", f"{_fmt_currency(pmi_monthly)} / month"),
+                            ("HOA", f"{_fmt_currency(hoa_monthly)} / month"),
+                            ("Other Home Costs", f"{_fmt_currency(other_yearly)} / year"),
+                            ("Tax & Cost Monthly Total", _fmt_currency(monthly_tax_pdf + monthly_ins_pdf + monthly_hoa_pdf + monthly_pmi_pdf + monthly_other_pdf)),
+                        ],
+                        "household": [
+                            ("Include Household Expenses", "Yes" if include_household_expenses else "No"),
+                            ("Daycare", f"{_fmt_currency(daycare_weekly)} / week"),
+                            ("Groceries", f"{_fmt_currency(groceries_weekly)} / week"),
+                            ("Utilities", f"{_fmt_currency(utilities_monthly)} / month"),
+                            ("Property Expenses", f"{_fmt_currency(property_expenses_monthly)} / month"),
+                            ("Household Monthly Total", _fmt_currency(household_monthly)),
+                        ],
+                        "vehicle": [
+                            ("Include Vehicle Expenses", "Yes" if include_vehicle_expenses else "No"),
+                            ("Car Tax", f"{_fmt_currency(car_tax_annual)} / year"),
+                            ("Gasoline", f"{_fmt_currency(vehicle_gas_weekly)} / week"),
+                            ("Car Maintenance", f"{_fmt_currency(car_maintenance_annual)} / year"),
+                            ("Car Insurance", f"{_fmt_currency(car_insurance_monthly)} / month"),
+                            ("Vehicle Monthly Total", _fmt_currency(vehicle_monthly)),
+                        ],
+                        "college": [
+                            ("Include College Savings", "Yes" if include_college_savings else "No"),
+                            ("529 Contribution", f"{_fmt_currency(college_529_annual)} / year per child"),
+                            ("Number of Kids", str(int(num_kids))),
+                            ("College Savings Monthly Total", _fmt_currency(college_monthly)),
+                        ],
+                        "custom_expenses": [
+                            ("Include Additional Expenses", "Yes" if include_custom_expenses else "No"),
+                            ("Logged Additional Expenses", str(len(custom_rows))),
+                            ("Additional Expenses Monthly Total", _fmt_currency(custom_monthly_pdf)),
+                        ],
+                        "custom_expense_rows": custom_rows,
+                        "take_home": [
+                            ("Include Take Home Pay", "Yes" if include_take_home else "No"),
+                            ("Logged Income Sources", str(len(take_home_rows))),
+                            ("Take Home Monthly Total", _fmt_currency(take_home_monthly_pdf)),
+                        ],
+                        "take_home_rows": take_home_rows,
+                        "extra_principal": [
+                            (
+                                "Scheduled Extra Payment",
+                                _fmt_currency(float(st.session_state.get("scheduled_extra_amount", 0.0) or 0.0)),
+                            ),
+                            (
+                                "Scheduled Frequency",
+                                str(st.session_state.get("scheduled_extra_frequency", "Monthly")),
+                            ),
+                            (
+                                "Scheduled Start Year",
+                                str(int(st.session_state.get("scheduled_extra_start_year", 1) or 1)),
+                            ),
+                            (
+                                "Scheduled End Year",
+                                str(int(st.session_state.get("scheduled_extra_end_year", int(loan_term_years)) or int(loan_term_years))),
+                            ),
+                            ("Lump Sum Entries", str(len(lump_sum_rows))),
+                        ],
+                        "lump_sum_rows": lump_sum_rows,
+                        "chart_payload": chart_payload_pdf,
+                        "chart_image_path": st.session_state.get("mortgage_amortization_chart_image_path"),
+                        "summary": [
+                            ("House Price", _fmt_currency(home_price)),
+                            ("Loan Amount", _fmt_currency(loan_amount_pdf)),
+                            ("Down Payment", _fmt_currency(down_payment_amt_pdf)),
+                            ("Mortgage (Monthly, P&I)", _fmt_currency(pi_pdf)),
+                            ("Total of Mortgage Payments (P&I)", _fmt_currency(summary_total_pi_paid_pdf)),
+                            ("Total Interest", _fmt_currency(summary_total_interest_pdf)),
+                            ("Interest (Monthly, initial est.)", _fmt_currency(monthly_interest_payment_pdf)),
+                            ("Total Monthly Payment", _fmt_currency(monthly_total_pdf)),
+                            ("Take Home Pay (Monthly)", _fmt_currency(take_home_monthly_pdf) if include_take_home else "Not enabled"),
+                            ("Affordability", "Affordable" if is_affordable_pdf else ("Exceeds take-home" if include_take_home else "N/A")),
+                            ("Leftover Monthly", _fmt_currency(leftover_monthly_pdf) if leftover_monthly_pdf is not None else "N/A"),
+                            ("Estimated Payoff Date", summary_payoff_pdf),
+                        ],
+                    }
+
+                    st.session_state["mortgage_pdf_bytes"] = _build_mortgage_assumptions_pdf(report)
+                    st.success("PDF generated. Click Download PDF to save it.")
+                except Exception as exc:
+                    st.error(f"Generate PDF failed: {exc}")
+
+            pdf_bytes = st.session_state.get("mortgage_pdf_bytes")
+            if pdf_bytes:
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_bytes,
+                    file_name="mortgage_loan_assumptions_plan.pdf",
+                    mime="application/pdf",
+                    key="download_mortgage_pdf",
+                )
+
             # Reset one-shot flag
             if st.session_state.pop("mortgage_just_calculated", False):
                 st.session_state["mortgage_expanded"] = True
@@ -1022,6 +1572,11 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
                     inputs.start_month,
                     inputs.loan_term_years
                 )
+                monthly_interest_payment = (
+                    loan_amount * ((inputs.annual_interest_rate_pct / 100.0) / 12.0)
+                    if loan_amount > 0 and inputs.annual_interest_rate_pct > 0
+                    else 0.0
+                )
 
                 # Store all data for display outside expander
                 st.session_state["_mortgage_banner"] = {
@@ -1040,6 +1595,7 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
                     "total_interest": total_interest,
                     "payoff": payoff,
                     "pi": pi,
+                    "monthly_interest_payment": monthly_interest_payment,
                     "tax_cost_monthly": tax_cost_monthly,
                     "household_monthly": household_monthly,
                     "vehicle_monthly": vehicle_monthly,
@@ -1057,29 +1613,218 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
                 # ---- Display chart INSIDE expander ----
                 chart_data = st.session_state["_mortgage_chart"]
                 
-                # ---- Extra Payment Controls STATE ----
-                extra_payment_amount = st.session_state.get("extra_payment_amount", 0.0)
-                extra_payment_freq = st.session_state.get("extra_payment_freq", 1)
+                # ---- Scheduled + Lump Sum Payment Controls ----
+                st.markdown("#### Extra Principal Payments")
 
-                if "use_extra_payments" not in st.session_state:
-                    st.session_state["use_extra_payments"] = False
+                saved_frequency = str(st.session_state.get("scheduled_extra_frequency", "Monthly") or "Monthly")
+                frequency_options = ["Monthly", "Quarterly", "Semi-Annual", "Annual"]
+                if saved_frequency not in frequency_options:
+                    saved_frequency = "Monthly"
 
-                if st.session_state.get("redo_chart", False):
-                    st.session_state["use_extra_payments"] = True
+                saved_start_year = int(st.session_state.get("scheduled_extra_start_year", 1) or 1)
+                saved_start_year = max(1, min(saved_start_year, int(chart_data["loan_term_years"])))
+
+                saved_end_year = int(
+                    st.session_state.get("scheduled_extra_end_year", int(chart_data["loan_term_years"]))
+                    or int(chart_data["loan_term_years"])
+                )
+                saved_end_year = max(saved_start_year, min(saved_end_year, int(chart_data["loan_term_years"])))
+
+                recurring_cols = st.columns([1.2, 1.0, 1.0, 1.0], gap="small")
+                with recurring_cols[0]:
+                    recurring_extra_amount = st.number_input(
+                        "Scheduled Payment ($)",
+                        min_value=0.0,
+                        value=float(st.session_state.get("scheduled_extra_amount", 0.0) or 0.0),
+                        step=100.0,
+                        key="scheduled_extra_amount",
+                    )
+                with recurring_cols[1]:
+                    recurring_frequency_label = st.selectbox(
+                        "Frequency",
+                        frequency_options,
+                        index=frequency_options.index(saved_frequency),
+                        key="scheduled_extra_frequency",
+                    )
+                with recurring_cols[2]:
+                    recurring_start_year = st.number_input(
+                        "Start Year",
+                        min_value=1,
+                        max_value=int(chart_data["loan_term_years"]),
+                        value=int(saved_start_year),
+                        step=1,
+                        key="scheduled_extra_start_year",
+                    )
+                with recurring_cols[3]:
+                    recurring_end_year = st.number_input(
+                        "End Year",
+                        min_value=int(recurring_start_year),
+                        max_value=int(chart_data["loan_term_years"]),
+                        value=max(int(recurring_start_year), int(saved_end_year)),
+                        step=1,
+                        key="scheduled_extra_end_year",
+                    )
+
+                frequency_to_months = {
+                    "Monthly": 1,
+                    "Quarterly": 3,
+                    "Semi-Annual": 6,
+                    "Annual": 12,
+                }
+                recurring_frequency_months = frequency_to_months.get(recurring_frequency_label, 1)
+                recurring_start_month = ((int(recurring_start_year) - 1) * 12) + 1
+                recurring_end_month = int(recurring_end_year) * 12
+
+                if "lump_sum_payments" not in st.session_state:
+                    st.session_state["lump_sum_payments"] = []
+
+                lump_cols = st.columns([1.0, 1.2, 0.8], gap="small")
+                with lump_cols[0]:
+                    st.number_input(
+                        "Lump Sum Year",
+                        min_value=1,
+                        max_value=int(chart_data["loan_term_years"]),
+                        step=1,
+                        key="lump_sum_year_input",
+                    )
+                with lump_cols[1]:
+                    st.number_input(
+                        "Lump Sum Amount ($)",
+                        min_value=0.0,
+                        step=100.0,
+                        key="lump_sum_amount_input",
+                    )
+
+                def _add_lump_sum() -> None:
+                    year = int(st.session_state.get("lump_sum_year_input", 1))
+                    amount = float(st.session_state.get("lump_sum_amount_input", 0.0))
+                    if amount <= 0:
+                        st.session_state["lump_sum_error"] = "Lump sum amount must be greater than $0."
+                        return
+                    st.session_state.setdefault("lump_sum_payments", []).append({
+                        "Year": year,
+                        "Amount": amount,
+                    })
+                    st.session_state["lump_sum_amount_input"] = 0.0
+                    st.session_state.pop("lump_sum_error", None)
+
+                with lump_cols[2]:
+                    st.button("Add Lump Sum", key="add_lump_sum_btn", on_click=_add_lump_sum, width="stretch")
+
+                if st.session_state.get("lump_sum_error"):
+                    st.warning(st.session_state["lump_sum_error"])
+
+                lump_log_container = st.container(height=130)
+                with lump_log_container:
+                    lump_rows = st.session_state.get("lump_sum_payments", [])
+                    if not lump_rows:
+                        st.caption("No lump sum payments added.")
+                    else:
+                        for idx, row in enumerate(lump_rows):
+                            row_cols = st.columns([0.9, 1.1, 0.3], gap="small")
+                            with row_cols[0]:
+                                st.number_input(
+                                    "Year",
+                                    min_value=1,
+                                    max_value=int(chart_data["loan_term_years"]),
+                                    step=1,
+                                    value=int(row.get("Year", 1)),
+                                    key=f"lump_year_{idx}",
+                                    label_visibility="collapsed",
+                                )
+                            with row_cols[1]:
+                                st.number_input(
+                                    "Amount",
+                                    min_value=0.0,
+                                    step=100.0,
+                                    value=float(row.get("Amount", 0.0)),
+                                    key=f"lump_amount_{idx}",
+                                    label_visibility="collapsed",
+                                )
+                            with row_cols[2]:
+                                if st.button("🗑️", key=f"lump_delete_{idx}"):
+                                    st.session_state["lump_sum_payments"] = [
+                                        r for i, r in enumerate(st.session_state.get("lump_sum_payments", [])) if i != idx
+                                    ]
+                                    st.rerun()
+
+                        # persist edits
+                        updated_lumps = []
+                        for idx, _ in enumerate(st.session_state.get("lump_sum_payments", [])):
+                            updated_lumps.append(
+                                {
+                                    "Year": int(st.session_state.get(f"lump_year_{idx}", 1)),
+                                    "Amount": float(st.session_state.get(f"lump_amount_{idx}", 0.0)),
+                                }
+                            )
+                        st.session_state["lump_sum_payments"] = updated_lumps
+
+                lump_sum_by_month = {}
+                for row in st.session_state.get("lump_sum_payments", []):
+                    year_num = max(1, min(int(chart_data["loan_term_years"]), int(row.get("Year", 1))))
+                    amount = max(0.0, float(row.get("Amount", 0.0)))
+                    month_index = (year_num - 1) * 12 + 1
+                    lump_sum_by_month[month_index] = lump_sum_by_month.get(month_index, 0.0) + amount
+
+                # Persist amortization adjustment state + cache image for profile/PDF reuse
+                chart_payload_current = {
+                    "loan_amount": float(chart_data["loan_amount"]),
+                    "annual_rate": float(chart_data["annual_rate"]),
+                    "loan_term_years": int(chart_data["loan_term_years"]),
+                    "pi": float(chart_data["pi"]),
+                    "recurring_extra_amount": float(recurring_extra_amount),
+                    "recurring_frequency_months": int(recurring_frequency_months),
+                    "recurring_start_month": int(recurring_start_month),
+                    "recurring_end_month": int(recurring_end_month),
+                    "lump_sum_rows": list(st.session_state.get("lump_sum_payments", [])),
+                    "start_year": int(inputs.start_year),
+                    "start_month": int(inputs.start_month),
+                }
+                st.session_state["mortgage_chart_payload"] = chart_payload_current
+
+                cached_chart_path = _ensure_amortization_chart_cached(chart_payload_current)
+                if cached_chart_path:
+                    st.session_state["mortgage_amortization_chart_image_path"] = cached_chart_path
 
                 # ---- Select amortization for chart ----
-                if (
-                        st.session_state.get("use_extra_payments", False)
-                        and extra_payment_amount > 0
-                ):
-                    amortization_df = amortization_schedule_with_extra(
+                has_recurring = recurring_extra_amount > 0
+                has_lumps = any(float(row.get("Amount", 0.0)) > 0 for row in st.session_state.get("lump_sum_payments", []))
+
+                if has_recurring or has_lumps:
+                    dynamic_total_interest, dynamic_total_pi_paid, dynamic_months_to_payoff = amortization_totals_with_adjustments(
                         chart_data["loan_amount"],
                         chart_data["annual_rate"],
                         chart_data["loan_term_years"],
                         chart_data["pi"],
-                        extra_payment_annual=extra_payment_amount * extra_payment_freq,
+                        recurring_extra_amount=recurring_extra_amount,
+                        recurring_frequency_months=recurring_frequency_months,
+                        recurring_start_month=recurring_start_month,
+                        recurring_end_month=recurring_end_month,
+                        lump_sum_by_month=lump_sum_by_month,
+                    )
+                    dynamic_payoff = payoff_date_from_months(
+                        inputs.start_year,
+                        inputs.start_month,
+                        dynamic_months_to_payoff,
+                    )
+
+                    amortization_df = amortization_schedule_with_adjustments(
+                        chart_data["loan_amount"],
+                        chart_data["annual_rate"],
+                        chart_data["loan_term_years"],
+                        chart_data["pi"],
+                        recurring_extra_amount=recurring_extra_amount,
+                        recurring_frequency_months=recurring_frequency_months,
+                        recurring_start_month=recurring_start_month,
+                        recurring_end_month=recurring_end_month,
+                        lump_sum_by_month=lump_sum_by_month,
                     )
                 else:
+                    dynamic_total_interest = total_interest
+                    dynamic_total_pi_paid = total_pi_paid
+                    dynamic_months_to_payoff = int(chart_data["loan_term_years"]) * 12
+                    dynamic_payoff = payoff
+
                     amortization_df = amortization_schedule(
                         chart_data["loan_amount"],
                         chart_data["annual_rate"],
@@ -1103,36 +1848,28 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
                 ax.grid(True, linestyle="--", alpha=0.6)
                 ax.legend()
 
+                chart_summary_text = (
+                    f"Total of Mortgage Payments (P&I): ${dynamic_total_pi_paid:,.2f}\n"
+                    f"Total Interest: ${dynamic_total_interest:,.2f}\n"
+                    f"Mortgage Payoff Date: {dynamic_payoff}"
+                )
+                ax.text(
+                    0.98,
+                    0.98,
+                    chart_summary_text,
+                    transform=ax.transAxes,
+                    fontsize=9.5,
+                    va="top",
+                    ha="right",
+                    bbox={
+                        "boxstyle": "round,pad=0.4",
+                        "facecolor": "white",
+                        "edgecolor": "#9e9e9e",
+                        "alpha": 0.9,
+                    },
+                )
+
                 st.pyplot(fig)
-
-                controls_row = st.columns([1, 2, 2, 2, 1], gap="small")
-
-                with controls_row[1]:
-                    st.number_input(
-                        "Extra Payment ($)",
-                        min_value=0.0,
-                        step=100.0,
-                        key="extra_payment_amount",
-                        label_visibility="collapsed",
-                    )
-                    st.caption("Extra Payment ($)")
-
-                with controls_row[2]:
-                    st.number_input(
-                        "Times / Year",
-                        min_value=1,
-                        step=1,
-                        key="extra_payment_freq",
-                        label_visibility="collapsed",
-                    )
-                    st.caption("Times / Year")
-
-                with controls_row[3]:
-                    st.button(
-                        "Redo Chart",
-                        key="redo_chart",
-                        width='stretch'
-                    )
 
                 # ---- Display banner INSIDE expander ----
                 banner = st.session_state["_mortgage_banner"]
@@ -1166,6 +1903,9 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
 
                 # ---- Display summary INSIDE expander ----
                 summary = st.session_state["_mortgage_summary"]
+                summary_display_total_pi_paid = dynamic_total_pi_paid
+                summary_display_total_interest = dynamic_total_interest
+                summary_display_payoff = dynamic_payoff
                 
                 st.markdown("### Summary")
 
@@ -1174,14 +1914,19 @@ Each entry is saved into the scrollable log. Annual amounts are automatically co
                     st.metric("House Price", f"${summary['home_price']:,.2f}")
                     st.metric("Loan Amount", f"${summary['loan_amount']:,.2f}")
                     st.metric("Down Payment", f"${summary['down_payment_amt']:,.2f}")
-                    st.metric("Total of Mortgage Payments (P&I)", f"${summary['total_pi_paid']:,.2f}")
-                    st.metric("Total Interest", f"${summary['total_interest']:,.2f}")
-                    st.metric("Mortgage Payoff Date", summary['payoff'])
+                    st.metric("Total of Mortgage Payments (P&I)", f"${summary_display_total_pi_paid:,.2f}")
+                    st.metric("Total Interest", f"${summary_display_total_interest:,.2f}")
+                    st.metric("Mortgage Payoff Date", summary_display_payoff)
                 with c2:
                     st.metric(
                         "Mortgage (Monthly)",
                         f"${summary['pi']:,.0f}",
                         help="Principal & Interest only"
+                    )
+                    st.metric(
+                        "Interest (Monthly)",
+                        f"${summary['monthly_interest_payment']:,.0f}",
+                        help="Estimated first-month interest portion of the mortgage payment"
                     )
                     st.metric(
                         "Tax & Cost (Monthly)",
