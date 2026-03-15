@@ -1,15 +1,22 @@
-"""UI helpers for the floating chatbot and checklist/notes section."""
-
-from __future__ import annotations
-
 import re
-from typing import List, Dict, Any
+from pathlib import Path
+from typing import Any
 
 import uuid
 from datetime import date
 
 import streamlit as st
 
+from assistant.checklist_store import (
+    get_profile_cache_payload,
+    merge_ui_rows_into_payload,
+    payload_to_ui_rows,
+    save_profile_cache_payload,
+)
+from assistant.document_ingestion import (
+    DEFAULT_HAIKU_INFERENCE_MODEL_ID,
+    extract_actions_from_pdf,
+)
 from config.pricing import (
     CLAUDE_INFERENCE_PROFILES,
     estimate_request_cost,
@@ -17,6 +24,7 @@ from config.pricing import (
     get_pricing_version,
 )
 from profile.costs import _recalculate_costs
+from profile.identity import ProfileIdentityError, get_profile_identity, profile_key
 from profile.state_io import auto_save_profile
 
 STOPWORDS = {
@@ -70,83 +78,50 @@ ALIASES = {
 }
 
 
-DEFAULT_CHECKLIST: List[Dict[str, object]] = [
-    {
-        "label": "Get pre-approved by a lender",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Financing",
-        "notes": "",
-    },
-    {
-        "label": "Choose a loan officer",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Financing",
-        "notes": "",
-    },
-    {
-        "label": "Pull credit reports",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Financing",
-        "notes": "",
-    },
-    {
-        "label": "Hire a buyer's agent",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Representation",
-        "notes": "",
-    },
-    {
-        "label": "Schedule a home inspection",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Inspection",
-        "notes": "",
-    },
-    {
-        "label": "Order an appraisal",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Inspection",
-        "notes": "",
-    },
-    {
-        "label": "Engage a real estate attorney",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Legal",
-        "notes": "",
-    },
-    {
-        "label": "Budget for closing costs",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Closing",
-        "notes": "",
-    },
-    {
-        "label": "Review homeowners insurance options",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Insurance",
-        "notes": "",
-    },
-    {
-        "label": "HOA Covenant Review",
-        "status": "not_started",
-        "due_date": None,
-        "category": "Legal",
-        "notes": "",
-    },
-]
+def _current_profile_key() -> str | None:
+    try:
+        owner_sub, house_slug = get_profile_identity()
+    except ProfileIdentityError:
+        return None
+    return profile_key(owner_sub, house_slug)
+
+
+def _persist_checklist_cache() -> None:
+    payload = st.session_state.get("assistant_checklist_payload")
+    if not isinstance(payload, dict):
+        return
+    rows = st.session_state.get("assistant_checklist", [])
+    updated_payload = merge_ui_rows_into_payload(payload, rows)
+    cache_path_raw = st.session_state.get("assistant_checklist_cache_path")
+    cache_path = Path(cache_path_raw) if cache_path_raw else None
+    save_profile_cache_payload(updated_payload, cache_path)
+    st.session_state["assistant_checklist_payload"] = updated_payload
 
 
 def _ensure_assistant_state() -> None:
-    if "assistant_checklist" not in st.session_state:
-        st.session_state["assistant_checklist"] = [item.copy() for item in DEFAULT_CHECKLIST]
+    current_key = _current_profile_key()
+    if (
+        "assistant_checklist" not in st.session_state
+        or st.session_state.get("assistant_profile_key") != current_key
+    ):
+        payload, cache_path = get_profile_cache_payload()
+        st.session_state["assistant_checklist_payload"] = payload
+        st.session_state["assistant_checklist"] = payload_to_ui_rows(payload)
+        st.session_state["assistant_checklist_cache_path"] = str(cache_path) if cache_path else None
+        st.session_state["assistant_profile_key"] = current_key
+
+    # Always enforce that the full default checklist from JSON is present,
+    # even if session/profile data was loaded with a partial list.
+    payload = st.session_state.get("assistant_checklist_payload")
+    if isinstance(payload, dict):
+        current_rows = st.session_state.get("assistant_checklist", [])
+        normalized_payload = merge_ui_rows_into_payload(payload, current_rows)
+        st.session_state["assistant_checklist_payload"] = normalized_payload
+        st.session_state["assistant_checklist"] = payload_to_ui_rows(normalized_payload)
+        cache_path_raw = st.session_state.get("assistant_checklist_cache_path")
+        cache_path = Path(cache_path_raw) if cache_path_raw else None
+        save_profile_cache_payload(normalized_payload, cache_path)
+
     if "assistant_notes" not in st.session_state:
         st.session_state["assistant_notes"] = ""
     if "assistant_selected_label" not in st.session_state:
@@ -161,6 +136,8 @@ def _ensure_assistant_state() -> None:
         st.session_state["assistant_profile_initialized"] = False
     if "assistant_pending_actions" not in st.session_state:
         st.session_state["assistant_pending_actions"] = None
+    if "assistant_pdf_processing" not in st.session_state:
+        st.session_state["assistant_pdf_processing"] = False
 
 
 def _get_pricing_key_for_profile(profile_id: str) -> str | None:
@@ -464,15 +441,16 @@ def _apply_actions(actions: list[dict[str, Any]]) -> None:
         label = action.get("label")
         for item in checklist:
             if item.get("label") == label:
-                if action.get("status"):
+                if "status" in action:
                     item["status"] = action["status"]
-                if action.get("category"):
+                if "category" in action:
                     item["category"] = action["category"]
-                if action.get("due_date"):
+                if "due_date" in action:
                     item["due_date"] = action["due_date"]
-                if action.get("notes"):
+                if "notes" in action:
                     item["notes"] = action["notes"]
     st.session_state["assistant_checklist"] = checklist
+    _persist_checklist_cache()
     st.session_state["assistant_pending_actions"] = None
 
 
@@ -562,6 +540,7 @@ def render_checklist_and_notes() -> None:
                         }
                     )
             st.session_state["assistant_checklist"] = updated_rows
+            _persist_checklist_cache()
             if selected_label:
                 st.session_state["assistant_selected_label"] = selected_label
 
@@ -588,8 +567,62 @@ def render_checklist_and_notes() -> None:
             )
             if selected_item:
                 selected_item["notes"] = updated_notes
+                _persist_checklist_cache()
             else:
                 st.session_state["assistant_notes"] = updated_notes
+
+        pdf_box = st.container(border=True)
+        with pdf_box:
+            st.markdown("### Import Updates From PDF")
+            uploaded_pdf = st.file_uploader(
+                "Upload checklist-supporting PDF",
+                type=["pdf"],
+                key="assistant_pdf_upload",
+            )
+            apply_pdf = st.button(
+                "Apply from PDF",
+                disabled=uploaded_pdf is None or st.session_state.get("assistant_pdf_processing", False),
+                key="assistant_apply_pdf",
+            )
+
+            if apply_pdf and uploaded_pdf:
+                st.session_state["assistant_pdf_processing"] = True
+                try:
+                    model_id = (
+                        st.session_state.get("assistant_inference_profile")
+                        or DEFAULT_HAIKU_INFERENCE_MODEL_ID
+                    )
+                    result = extract_actions_from_pdf(
+                        uploaded_pdf.getvalue(),
+                        uploaded_pdf.name,
+                        st.session_state.get("assistant_checklist", []),
+                        model_id=model_id,
+                    )
+                    _record_cost(
+                        int(result.get("input_tokens") or 0),
+                        int(result.get("output_tokens") or 0),
+                    )
+                    actions = result.get("actions", [])
+                    if actions:
+                        st.session_state["assistant_pending_actions"] = actions
+                        st.session_state["assistant_chat_history"].append(
+                            {
+                                "role": "assistant",
+                                "content": (
+                                    f"PDF **{uploaded_pdf.name}** parsed. "
+                                    f"{result.get('summary', 'Proposed updates are ready for confirmation.')}"
+                                ),
+                            }
+                        )
+                        st.success("Proposed checklist updates generated. Review and confirm below.")
+                    else:
+                        st.info(
+                            f"Processed **{uploaded_pdf.name}**, but no confident checklist updates were found."
+                        )
+                except Exception as exc:
+                    st.error(f"Failed to process PDF: {exc}")
+                finally:
+                    st.session_state["assistant_pdf_processing"] = False
 
         with st.expander("Home Buying Assistant", expanded=False):
             with st.expander("Inference Profile", expanded=False):
@@ -612,7 +645,11 @@ def render_checklist_and_notes() -> None:
                 profile_options = {profile_id: label for _, profile_id, label in profile_rows}
                 default_profile_id = st.session_state.get("assistant_inference_profile")
                 if not st.session_state.get("assistant_profile_initialized"):
-                    default_profile_id = next(iter(profile_options.keys()))
+                    default_profile_id = (
+                        DEFAULT_HAIKU_INFERENCE_MODEL_ID
+                        if DEFAULT_HAIKU_INFERENCE_MODEL_ID in profile_options
+                        else next(iter(profile_options.keys()))
+                    )
                     st.session_state["assistant_inference_profile"] = default_profile_id
                     st.session_state["assistant_profile_initialized"] = True
                 elif default_profile_id not in profile_options:

@@ -470,6 +470,9 @@ This section can be expanded with additional traffic-aware providers
         profile["commute_results"][provider_key] = {
             "segments": result["segments"],
             "total_m": result["total_m"],
+            "total_drive_s": result.get("total_drive_s", result.get("total_s", 0.0)),
+            "total_loiter_s": result.get("total_loiter_s", 0.0),
+            "total_trip_s": result.get("total_trip_s", result.get("total_s", 0.0)),
             "total_s": result["total_s"],
             "segment_routes": result["segment_routes"],
         }
@@ -477,7 +480,9 @@ This section can be expanded with additional traffic-aware providers
         profile["infra"] = infra
         status_summary = (
             f"Updated {datetime.now().strftime('%H:%M:%S')} via {provider_key} · "
-            f"{result['total_m'] / 1609.344:,.2f} mi · {result['total_s'] / 60.0:,.1f} min"
+            f"{result['total_m'] / 1609.344:,.2f} mi · "
+            f"Drive {result.get('total_drive_s', result.get('total_s', 0.0)) / 60.0:,.1f} min · "
+            f"Loiter {result.get('total_loiter_s', 0.0) / 60.0:,.1f} min"
         )
         st.session_state[status_key] = status_summary
         st.session_state[progress_key] = 100
@@ -567,7 +572,22 @@ This section can be expanded with additional traffic-aware providers
         with col1:
             st.metric("Total Distance", f"{res['total_m'] / 1609.344:,.2f} mi")
         with col2:
-            st.metric("Total Drive Time", f"{res['total_s'] / 60.0:,.1f} min")
+            st.metric(
+                "Total Drive Time",
+                f"{res.get('total_drive_s', res.get('total_s', 0.0)) / 60.0:,.1f} min",
+            )
+
+        col3, col4 = st.columns(2)
+        with col3:
+            st.metric(
+                "Total Loiter Time",
+                f"{res.get('total_loiter_s', 0.0) / 60.0:,.1f} min",
+            )
+        with col4:
+            st.metric(
+                "Total Trip Time",
+                f"{res.get('total_trip_s', res.get('total_s', 0.0)) / 60.0:,.1f} min",
+            )
 
         # Build map
         m = folium.Map(

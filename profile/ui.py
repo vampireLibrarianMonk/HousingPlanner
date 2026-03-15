@@ -21,6 +21,8 @@ def render_profile_manager() -> None:
         try:
             owner_sub, house_slug = get_profile_identity()
             current_key = profile_key(owner_sub, house_slug)
+            st.session_state["profile_owner_sub"] = owner_sub
+            st.session_state["profile_house_slug"] = house_slug
         except ProfileIdentityError as exc:
             st.warning(str(exc))
             st.caption(
@@ -63,6 +65,8 @@ def render_profile_manager() -> None:
             if not profile:
                 st.error("Profile not found.")
             else:
+                st.session_state["profile_owner_sub"] = owner_sub
+                st.session_state["profile_house_slug"] = selected_slug
                 apply_profile(profile)
                 st.success("Profile loaded. Scroll to see updates.")
                 st.rerun()
@@ -107,6 +111,8 @@ def render_profile_manager() -> None:
 
 def save_current_profile() -> str:
     owner_sub, house_slug = get_profile_identity()
+    st.session_state["profile_owner_sub"] = owner_sub
+    st.session_state["profile_house_slug"] = house_slug
     profile = extract_profile()
     save_path = save_profile(owner_sub, house_slug, profile)
     return str(save_path)

@@ -1,0 +1,358 @@
+{
+  "schema_version": "3.0",
+
+  "transaction": {
+    "transaction_id": "",
+    "status": "under_contract",
+    "contract_date": "",
+    "closing_date": "",
+    "closing_time": "",
+    "property": {
+      "address": "",
+      "city": "",
+      "state": "",
+      "zip": "",
+      "county": "",
+      "property_type": "",
+      "year_built": null,
+      "square_feet": null
+    }
+  },
+
+  "participants": {
+    "buyer": {
+      "name": "",
+      "email": "",
+      "phone": ""
+    },
+    "seller": {
+      "name": ""
+    },
+    "lender": {
+      "company": "",
+      "loan_officer": "",
+      "email": "",
+      "phone": ""
+    },
+    "settlement_company": {
+      "company": "",
+      "contact": "",
+      "email": "",
+      "phone": "",
+      "address": ""
+    },
+    "real_estate_agents": {
+      "buyer_agent": {
+        "name": "",
+        "company": "",
+        "email": "",
+        "phone": ""
+      },
+      "seller_agent": {
+        "name": "",
+        "company": ""
+      }
+    }
+  },
+
+  "financials": {
+    "purchase": {
+      "purchase_price": null,
+      "earnest_money": null
+    },
+
+    "loan": {
+      "loan_type": "",
+      "interest_rate": null,
+      "loan_amount": null,
+      "cash_to_close": null,
+      "clear_to_close": false
+    },
+
+    "taxes": {
+      "annual_property_tax": null
+    },
+
+    "associations": {
+      "1": {
+        "name": "",
+        "type": "",
+        "monthly_fee": null,
+        "working_capital_fee": null,
+        "setup_fee": null,
+        "management_company": "",
+        "contact_email": "",
+        "contact_phone": ""
+      }
+    },
+
+    "ownership_costs": {
+      "monthly_mortgage_estimate": null,
+      "monthly_hoa_total": null,
+      "monthly_tax_estimate": null,
+      "monthly_insurance_estimate": null,
+      "total_monthly_cost_estimate": null
+    }
+  },
+
+  "documents": {
+    "contract": {
+      "received": false,
+      "file_url": ""
+    },
+    "closing_disclosure": {
+      "received": false,
+      "file_url": ""
+    },
+    "hoa_resale_certificate": {
+      "received": false,
+      "file_url": ""
+    },
+    "inspection_report": {
+      "received": false,
+      "file_url": ""
+    },
+    "appraisal_report": {
+      "received": false,
+      "file_url": ""
+    },
+    "insurance_binder": {
+      "received": false,
+      "file_url": ""
+    }
+  },
+
+  "inspections": [
+    {
+      "type": "general_home",
+      "scheduled_date": "",
+      "completed": false,
+      "issues_found": [],
+      "report_url": ""
+    },
+    {
+      "type": "sewer_scope",
+      "scheduled_date": "",
+      "completed": false
+    }
+  ],
+
+  "utilities": [
+    {
+      "type": "electric",
+      "provider": "",
+      "transfer_required": true,
+      "account_created": false
+    },
+    {
+      "type": "water",
+      "provider": "",
+      "transfer_required": true,
+      "account_created": false
+    },
+    {
+      "type": "gas",
+      "provider": "",
+      "transfer_required": true,
+      "account_created": false
+    },
+    {
+      "type": "internet",
+      "provider": "",
+      "transfer_required": false
+    }
+  ],
+
+  "tasks": [
+    {
+      "task_id": "get-pre-approved-by-a-lender",
+      "title": "Get pre-approved by a lender",
+      "phase": "Financing",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "choose-a-loan-officer",
+      "title": "Choose a loan officer",
+      "phase": "Financing",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "pull-credit-reports",
+      "title": "Pull credit reports",
+      "phase": "Financing",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "hire-a-buyers-agent",
+      "title": "Hire a buyer's agent",
+      "phase": "Representation",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "schedule-a-home-inspection",
+      "title": "Schedule a home inspection",
+      "phase": "Inspection",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "order-an-appraisal",
+      "title": "Order an appraisal",
+      "phase": "Inspection",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "engage-a-real-estate-attorney",
+      "title": "Engage a real estate attorney",
+      "phase": "Legal",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "budget-for-closing-costs",
+      "title": "Budget for closing costs",
+      "phase": "Closing",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "review-homeowners-insurance-options",
+      "title": "Review homeowners insurance options",
+      "phase": "Insurance",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    },
+    {
+      "task_id": "hoa-covenant-review",
+      "title": "HOA Covenant Review",
+      "phase": "Legal",
+      "priority": "normal",
+      "due_offset_days": null,
+      "due_date": "",
+      "depends_on": [],
+      "assigned_to": "",
+      "status": "pending",
+      "notes": "",
+      "risk_flags": {
+        "financial": false,
+        "legal": false,
+        "schedule": false
+      }
+    }
+  ],
+
+  "automation": {
+    "auto_generate_tasks": true,
+    "auto_calculate_deadlines": true,
+    "calendar_sync": true,
+    "send_reminders": true
+  },
+
+  "risk_analysis": {
+    "hoa_risk_score": null,
+    "financial_risk_score": null,
+    "inspection_risk_score": null,
+    "overall_transaction_risk": null
+  },
+
+  "metadata": {
+    "created_by": "",
+    "created_timestamp": "",
+    "last_updated": ""
+  }
+}

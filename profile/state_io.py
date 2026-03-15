@@ -38,6 +38,37 @@ def _serialize_commute_profiles(commute_profiles: dict[str, Any]) -> dict[str, A
 
 def extract_profile() -> Dict[str, Any]:
     commute_profiles = st.session_state.get("commute_profiles", {})
+    chart_payload = st.session_state.get("mortgage_chart_payload", {})
+    if not isinstance(chart_payload, dict):
+        chart_payload = {}
+
+    freq_by_months = {
+        1: "Monthly",
+        3: "Quarterly",
+        6: "Semi-Annual",
+        12: "Annual",
+    }
+    recurring_frequency_months = int(chart_payload.get("recurring_frequency_months", 1) or 1)
+    recurring_start_month = int(chart_payload.get("recurring_start_month", 1) or 1)
+    recurring_end_month = int(chart_payload.get("recurring_end_month", 12) or 12)
+
+    inferred_start_year = ((max(1, recurring_start_month) - 1) // 12) + 1
+    inferred_end_year = max(1, recurring_end_month // 12)
+
+    scheduled_extra_amount = float(
+        st.session_state.get("scheduled_extra_amount", chart_payload.get("recurring_extra_amount", 0.0)) or 0.0
+    )
+    scheduled_extra_frequency = st.session_state.get("scheduled_extra_frequency") or freq_by_months.get(
+        recurring_frequency_months,
+        "Monthly",
+    )
+    scheduled_extra_start_year = int(
+        st.session_state.get("scheduled_extra_start_year", inferred_start_year) or inferred_start_year
+    )
+    scheduled_extra_end_year = int(
+        st.session_state.get("scheduled_extra_end_year", inferred_end_year) or inferred_end_year
+    )
+
     return {
         "locations": st.session_state.get("map_data", {}).get("locations", []),
         "commute": {
@@ -54,6 +85,15 @@ def extract_profile() -> Dict[str, Any]:
             "include_flags": st.session_state.get("mortgage_include_flags", {}),
             "custom_expenses_log": list(st.session_state.get("custom_expenses_log", [])),
             "take_home_log": list(st.session_state.get("take_home_log", [])),
+            "amortization": {
+                "scheduled_extra_amount": scheduled_extra_amount,
+                "scheduled_extra_frequency": scheduled_extra_frequency,
+                "scheduled_extra_start_year": scheduled_extra_start_year,
+                "scheduled_extra_end_year": scheduled_extra_end_year,
+                "lump_sum_payments": list(st.session_state.get("lump_sum_payments", [])),
+                "chart_payload": chart_payload,
+                "chart_image_path": st.session_state.get("mortgage_amortization_chart_image_path"),
+            },
             "cost_records": st.session_state.get("mortgage_cost_records", []),
             "inference_profile": st.session_state.get("mortgage_inference_profile"),
         },
@@ -108,6 +148,15 @@ def apply_profile(profile: Dict[str, Any]) -> None:
     st.session_state["take_home_log"] = mortgage.get("take_home_log", [])
     st.session_state["mortgage_cost_records"] = mortgage.get("cost_records", [])
     st.session_state["mortgage_inference_profile"] = mortgage.get("inference_profile")
+
+    amortization = mortgage.get("amortization", {})
+    st.session_state["scheduled_extra_amount"] = float(amortization.get("scheduled_extra_amount", 0.0) or 0.0)
+    st.session_state["scheduled_extra_frequency"] = amortization.get("scheduled_extra_frequency", "Monthly")
+    st.session_state["scheduled_extra_start_year"] = int(amortization.get("scheduled_extra_start_year", 1) or 1)
+    st.session_state["scheduled_extra_end_year"] = int(amortization.get("scheduled_extra_end_year", 30) or 30)
+    st.session_state["lump_sum_payments"] = list(amortization.get("lump_sum_payments", []))
+    st.session_state["mortgage_chart_payload"] = amortization.get("chart_payload", {})
+    st.session_state["mortgage_amortization_chart_image_path"] = amortization.get("chart_image_path")
 
 
     hoa = profile.get("hoa", {})
