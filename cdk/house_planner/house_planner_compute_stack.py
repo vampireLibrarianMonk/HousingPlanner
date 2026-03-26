@@ -42,6 +42,7 @@ class HousePlannerComputeStack(Stack):
         user_pool_client_id: str,
         user_pool_domain_name: str,
         app_domain_name: str,
+        app_branch: str = "master",
         **kwargs,
     ) -> None:
         """
@@ -51,6 +52,7 @@ class HousePlannerComputeStack(Stack):
         :param user_pool_client_id: Cognito client ID (for logout URL)
         :param user_pool_domain_name: Cognito domain prefix (for logout URL)
         :param app_domain_name: App domain for Streamlit config
+        :param app_branch: Git branch to deploy onto EC2 instances
         """
         super().__init__(scope, construct_id, **kwargs)
 
@@ -364,7 +366,10 @@ class HousePlannerComputeStack(Stack):
             "echo '[STREAMLIT] Cloning repository...' && ",
             "git clone https://github.com/vampireLibrarianMonk/HousingPlanner.git || true && ",
             "cd HousingPlanner && ",
-            "git fetch && ",
+            "git fetch origin && ",
+            f"git checkout {app_branch} && ",
+            f"git pull --ff-only origin {app_branch} && ",
+            f"echo '[STREAMLIT] Using branch: {app_branch}' && ",
             "echo '[STREAMLIT] Repository ready' && ",
             "",
             "# Python venv",

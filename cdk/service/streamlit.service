@@ -16,6 +16,10 @@ Environment="COGNITO_CLIENT_ID=__COGNITO_CLIENT_ID__"
 Environment="APP_DOMAIN=__APP_DOMAIN__"
 # Pull latest code on every start (keeps instance up-to-date after restarts)
 ExecStartPre=/bin/bash -c 'cd /home/ec2-user/HousingPlanner && git pull --ff-only'
+# Recreate virtual environment on every start to avoid stale/missing packages
+ExecStartPre=/bin/bash -c 'cd /home/ec2-user/HousingPlanner && rm -rf .venv && /usr/bin/python3.12 -m venv .venv'
+# Install dependencies into the fresh virtual environment
+ExecStartPre=/bin/bash -c 'source /home/ec2-user/HousingPlanner/.venv/bin/activate && python -m pip install --upgrade pip && python -m pip install --no-cache-dir -r /home/ec2-user/HousingPlanner/requirements.txt'
 # Fetch API keys from Secrets Manager
 ExecStartPre=/bin/bash -c 'export ORS_API_KEY=$(aws secretsmanager get-secret-value --secret-id houseplanner/ors_api_key --query SecretString --output text) && echo "ORS_API_KEY=$ORS_API_KEY" > /home/ec2-user/.streamlit_env'
 ExecStartPre=/bin/bash -c 'export GOOGLE_MAPS_API_KEY=$(aws secretsmanager get-secret-value --secret-id houseplanner/google_maps_api_key --query SecretString --output text) && echo "GOOGLE_MAPS_API_KEY=$GOOGLE_MAPS_API_KEY" >> /home/ec2-user/.streamlit_env'
