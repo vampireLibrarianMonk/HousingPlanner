@@ -93,9 +93,9 @@ class HousePlannerCloudFrontStack(Stack):
             protocol_policy=cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
             # Allow enough time for the ALB warm-up page to call /internal/ensure,
             # which may wait on EC2 start-up before returning.
-            # Keep this comfortably above the Lambda timeout to avoid initial 502s.
+            # CloudFront origin read timeout must stay within the service's valid range.
             keepalive_timeout=Duration.seconds(60),
-            read_timeout=Duration.seconds(180),
+            read_timeout=Duration.seconds(120),
         )
 
         # --------------------------------------------------

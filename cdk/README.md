@@ -81,6 +81,21 @@ aws secretsmanager create-secret \
 
 ## Deployment Steps
 
+### One-command deploy
+
+From the CDK directory, you can fetch your current public IP, resolve the CloudFront origin-facing prefix list, and deploy all stacks in one command:
+
+```bash
+cd /home/flaniganp/PycharmProjects/HouseTracker/app/cdk && \
+export MY_PUBLIC_IP=$(curl -s https://checkip.amazonaws.com)/32 && \
+export CLOUDFRONT_PL_ID=$(aws ec2 describe-managed-prefix-lists \
+  --query "PrefixLists[?PrefixListName=='com.amazonaws.global.cloudfront.origin-facing'].PrefixListId" \
+  --output text) && \
+cdk deploy --all \
+  -c ssh_cidr="$MY_PUBLIC_IP" \
+  -c cloudfront_pl_id="$CLOUDFRONT_PL_ID"
+```
+
 1) Export required deployment variables:
 
 ```bash
